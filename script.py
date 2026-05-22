@@ -32,7 +32,7 @@ load_dotenv()
 
 def get_permalink(date_obj):
     """Return the canonical Wordle answer page URL."""
-    return "https://wordsolver.tech/wordle-answer-today"
+    return "https://wordsolverx.com/wordle-answer-today"
 
 def upload_to_facebook(video_path, title, permalink):
     """Upload video to Facebook Page."""
@@ -292,7 +292,7 @@ def upload_to_tumblr(video_path, title, permalink):
         import pytumblr
         client = pytumblr.TumblrRestClient(consumer_key, consumer_secret, oauth_token, oauth_secret)
         
-        caption = f"Today's Wordle Solution!<br><br>Check out the answer and hints: <a href='{permalink}'>{permalink}</a><br><br>Use our advanced Wordle Solver: <a href='https://wordsolver.tech/wordle-solver'>https://wordsolver.tech/wordle-solver</a><br><br>#Wordle #WordleAnswer #WordSolverX"
+        caption = f"Today's Wordle Solution!<br><br>Check out the answer and hints: <a href='{permalink}'>{permalink}</a><br><br>Use our advanced Wordle Solver: <a href='https://wordsolverx.com/wordle-solver'>https://wordsolverx.com/wordle-solver</a><br><br>#Wordle #WordleAnswer #WordSolverX"
         
         print(f"Uploading to Tumblr blog: {blog_name}...")
         response = client.create_video(blog_name, data=video_path, caption=caption, tags=["Wordle", "Wordle Answer", "WordSolverX"])
@@ -1132,19 +1132,19 @@ else:
         youtube = build('youtube', 'v3', credentials=creds)
 
         # SEO-optimized title and description
-        video_title = f"Wordle {video_date} Answer | Today's Wordle Solution & Hints"
+        video_title = f"Wordle answer today {video_date} | Today's Wordle answers and solutions & Hints wordsolverx.com"
 
-        video_description = f"""🟩 Wordle Answer for {video_date}
+        video_description = f"""🟩 Wordle Answer today for {video_date}
 
-        wordle anwer today- https://wordsolver.tech/wordle-answer-today
+        wordle anwer today- https://wordsolverx.com/wordle-answer-today
 
 🔗 Try our FREE Wordle Solver:
 Solve ANY Wordle game in seconds with our intelligent word elimination tool!
 
-Wordle solver (advanced) solve any 4 to 12 letter wordle- https://wordsolver.tech/wordle-solver
+Wordle solver (advanced) solve any 4 to 12 letter wordle- https://wordsolverx.com/wordle-solver
 
 
-wordle archive and all previous answers- https://wordsolver.tech/wordle-answer-archive
+wordle archive and all previous answers- https://wordsolverx.com/wordle-answer-archive
 
 Watch how to solve today's Wordle puzzle step by step! Learn the best strategy to crack the daily Wordle.
 
