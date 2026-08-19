@@ -1923,27 +1923,41 @@ if 'YOUTUBE_REFRESH_TOKEN' not in os.environ:
     print(f"Video saved locally as: {final_video_file}")
     print("Skipping YouTube upload.")
 else:
-    # Expanded scopes for playlist management, comments, thumbnails, etc.
-    # The original refresh token may have only granted youtube.upload scope;
-    # we attempt to use the broader scopes and gracefully degrade on failure.
-    SCOPES = [
+    # Try broader scopes first (for playlists/comments/thumbnails). If the
+    # refresh token was issued with only youtube.upload scope, the broader
+    # scope request will fail with 'invalid_scope'. We then retry with
+    # just the upload scope, and gracefully skip the enrichment features.
+    SCOPES_FULL = [
         'https://www.googleapis.com/auth/youtube.upload',
-        'https://www.googleapis.com/auth/youtube',  # playlists, thumbnails, etc.
+        'https://www.googleapis.com/auth/youtube',  # playlists, thumbnails
         'https://www.googleapis.com/auth/youtube.force-ssl',  # comments
     ]
-    try:
-        creds = Credentials.from_authorized_user_info({
+    SCOPES_UPLOAD_ONLY = ['https://www.googleapis.com/auth/youtube.upload']
+    enrichment_enabled = True  # will be set False if scope is insufficient
+
+    def _build_youtube(scopes):
+        c = Credentials.from_authorized_user_info({
             'refresh_token': os.environ['YOUTUBE_REFRESH_TOKEN'],
             'client_id': os.environ['YOUTUBE_CLIENT_ID'],
             'client_secret': os.environ['YOUTUBE_CLIENT_SECRET'],
-            'scopes': SCOPES,
+            'scopes': scopes,
             'token_uri': 'https://oauth2.googleapis.com/token'
-        }, SCOPES)
+        }, scopes)
+        if c and c.expired and c.refresh_token:
+            c.refresh(Request())
+        return build('youtube', 'v3', credentials=c), c
 
-        if creds and creds.expired and creds.refresh_token:
-            creds.refresh(Request())
-
-        youtube = build('youtube', 'v3', credentials=creds)
+    try:
+        try:
+            youtube, creds = _build_youtube(SCOPES_FULL)
+            print("[youtube] Authenticated with full scopes (upload + playlists + comments)")
+        except Exception as scope_err:
+            # Most likely 'invalid_scope' because the original refresh token
+            # was issued for youtube.upload only. Retry with upload-only scope.
+            print(f"[youtube] Full-scope auth failed ({scope_err}); falling back to upload-only scope")
+            youtube, creds = _build_youtube(SCOPES_UPLOAD_ONLY)
+            enrichment_enabled = False
+            print("[youtube] Authenticated with upload-only scope (enrichment disabled)")
 
         # ====================================================================
         # SEO-OPTIMIZED TITLE / DESCRIPTION / TAGS (rotates daily)
@@ -2040,86 +2054,92 @@ else:
 
         # ====================================================================
         # POST-UPLOAD ENRICHMENT (all wrapped defensively)
+        # Skip if enrichment_enabled is False (token only has upload scope).
         # ====================================================================
 
-        # 1. Set custom thumbnail (requires channel verified for custom thumbnails)
-        if os.path.exists(thumbnail_path):
-            youtube_set_thumbnail(youtube, video_id, thumbnail_path)
+        if not enrichment_enabled:
+            print("[enrichment] Skipped — token only has youtube.upload scope.")
+            print("[enrichment] To enable playlists/comments/thumbnails/Shorts,")
+            print("[enrichment] re-run get_refresh_token.py with broader scopes.")
+        else:
+            # 1. Set custom thumbnail (requires channel verified for custom thumbnails)
+            if os.path.exists(thumbnail_path):
+                youtube_set_thumbnail(youtube, video_id, thumbnail_path)
 
-        # 2. Add to playlists (monthly + yearly)
-        try:
-            year = ist_now.year
-            month_name = ist_now.strftime("%B %Y")  # e.g., "August 2026"
-            playlists_to_add = [
-                (f"Wordle Answers — {month_name}",
-                 f"Daily Wordle solution videos for {month_name}."),
-                (f"Wordle Answers — {year}",
-                 f"All daily Wordle solution videos from {year}."),
-            ]
-            for title, desc in playlists_to_add:
-                pid = youtube_find_or_create_playlist(youtube, title, desc)
-                if pid:
-                    youtube_add_to_playlist(youtube, pid, video_id)
-        except Exception as e:
-            print(f"[playlist] Workflow failed: {e}")
+            # 2. Add to playlists (monthly + yearly)
+            try:
+                year = ist_now.year
+                month_name = ist_now.strftime("%B %Y")  # e.g., "August 2026"
+                playlists_to_add = [
+                    (f"Wordle Answers — {month_name}",
+                     f"Daily Wordle solution videos for {month_name}."),
+                    (f"Wordle Answers — {year}",
+                     f"All daily Wordle solution videos from {year}."),
+                ]
+                for title, desc in playlists_to_add:
+                    pid = youtube_find_or_create_playlist(youtube, title, desc)
+                    if pid:
+                        youtube_add_to_playlist(youtube, pid, video_id)
+            except Exception as e:
+                print(f"[playlist] Workflow failed: {e}")
 
-        # 3. Post pinned comment with chapter timestamps + question CTA
-        try:
-            comment_text = (
-                f"What was your first guess today? 🤔\n\n"
-                f"⏱️ Chapters:\n"
-                f"0:00 Can you solve it?\n"
-                f"0:15 3 hints\n"
-                f"0:35 The solve begins\n"
-                f"2:05 Word analysis\n"
-                f"2:50 WordleBot comparison\n"
-                f"\n"
-                f"Try our FREE Wordle Solver: https://wordsolverx.com/wordle-solver\n"
-                f"\n"
-                f"🟩 = got it    🟨 = close    ⬛ = stumped"
-            )
-            youtube_pin_comment(youtube, video_id, comment_text)
-        except Exception as e:
-            print(f"[comment] Workflow failed: {e}")
+            # 3. Post pinned comment with chapter timestamps + question CTA
+            try:
+                comment_text = (
+                    f"What was your first guess today? 🤔\n\n"
+                    f"⏱️ Chapters:\n"
+                    f"0:00 Can you solve it?\n"
+                    f"0:15 3 hints\n"
+                    f"0:35 The solve begins\n"
+                    f"2:05 Word analysis\n"
+                    f"2:50 WordleBot comparison\n"
+                    f"\n"
+                    f"Try our FREE Wordle Solver: https://wordsolverx.com/wordle-solver\n"
+                    f"\n"
+                    f"🟩 = got it    🟨 = close    ⬛ = stumped"
+                )
+                youtube_pin_comment(youtube, video_id, comment_text)
+            except Exception as e:
+                print(f"[comment] Workflow failed: {e}")
 
-        # 4. Streak counter (just log it for now; overlay is in video itself)
-        try:
-            streak_count = youtube_count_recent_uploads(youtube, days=365)
-            print(f"[streak] ~{streak_count} videos uploaded in last 365 days")
-        except Exception as e:
-            print(f"[streak] Failed: {e}")
+            # 4. Streak counter (just log it for now; overlay is in video itself)
+            try:
+                streak_count = youtube_count_recent_uploads(youtube, days=365)
+                print(f"[streak] ~{streak_count} videos uploaded in last 365 days")
+            except Exception as e:
+                print(f"[streak] Failed: {e}")
 
-        # 5. Create and upload YouTube Shorts version (30s hint+reveal)
-        try:
-            shorts_path = os.path.join(base_dir, f'wordle_shorts_{puzzle_date}.mp4')
-            if make_short_clip_from_video(final_video_file, shorts_path, max_duration=45):
-                # Upload as a separate Short (stays private — main video is the focus)
-                # We mark it as 'unlisted' to avoid duplicate-content penalty.
-                shorts_body = {
-                    'snippet': {
-                        'title': f"Wordle #{puzzle_num} in 45 seconds ⚡ ({video_date.split(',')[0]})",
-                        'description': (
-                            f"Quick solve of Wordle #{puzzle_num}!\n\n"
-                            f"Full video with hints & analysis: https://youtu.be/{video_id}\n\n"
-                            f"#Wordle #Shorts #WordleAnswer"
-                        ),
-                        'tags': ['Wordle', 'Shorts', 'Wordle Answer', f'Wordle #{puzzle_num}'],
-                        'categoryId': '20',
-                    },
-                    'status': {'privacyStatus': 'unlisted'},  # avoid duplicate penalty
-                }
-                shorts_media = MediaFileUpload(shorts_path, mimetype='video/mp4', resumable=True)
-                shorts_resp = youtube.videos().insert(
-                    part='snippet,status', body=shorts_body, media_body=shorts_media
-                ).execute()
-                print(f"[short] Shorts version uploaded: https://youtu.be/{shorts_resp['id']} (unlisted)")
-                # Clean up shorts file
-                try:
-                    os.remove(shorts_path)
-                except Exception:
-                    pass
-        except Exception as e:
-            print(f"[short] Workflow failed: {e}")
+            # 5. Create and upload YouTube Shorts version (30s hint+reveal)
+            try:
+                shorts_path = os.path.join(base_dir, f'wordle_shorts_{puzzle_date}.mp4')
+                if make_short_clip_from_video(final_video_file, shorts_path, max_duration=45):
+                    # Upload as a separate Short (stays private — main video is the focus)
+                    # We mark it as 'unlisted' to avoid duplicate-content penalty.
+                    shorts_body = {
+                        'snippet': {
+                            'title': f"Wordle #{puzzle_num} in 45 seconds ⚡ ({video_date.split(',')[0]})",
+                            'description': (
+                                f"Quick solve of Wordle #{puzzle_num}!\n\n"
+                                f"Full video with hints & analysis: https://youtu.be/{video_id}\n\n"
+                                f"#Wordle #Shorts #WordleAnswer"
+                            ),
+                            'tags': ['Wordle', 'Shorts', 'Wordle Answer', f'Wordle #{puzzle_num}'],
+                            'categoryId': '20',
+                        },
+                        'status': {'privacyStatus': 'unlisted'},  # avoid duplicate penalty
+                    }
+                    shorts_media = MediaFileUpload(shorts_path, mimetype='video/mp4', resumable=True)
+                    shorts_resp = youtube.videos().insert(
+                        part='snippet,status', body=shorts_body, media_body=shorts_media
+                    ).execute()
+                    print(f"[short] Shorts version uploaded: https://youtu.be/{shorts_resp['id']} (unlisted)")
+                    # Clean up shorts file
+                    try:
+                        os.remove(shorts_path)
+                    except Exception:
+                        pass
+            except Exception as e:
+                print(f"[short] Workflow failed: {e}")
 
     except Exception as e:
         if "uploadLimitExceeded" in str(e):
