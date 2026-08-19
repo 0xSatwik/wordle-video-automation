@@ -9,33 +9,38 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      
+
       - name: Set up Python 3.11
         uses: actions/setup-python@v5
         with:
           python-version: '3.11'
-      
+          # Cache pip downloads across runs — saves ~1-2 minutes per run
+          cache: 'pip'
+          cache-dependency-path: requirements.txt
+
       - name: Install system dependencies
         run: |
-          sudo apt update
-          sudo apt install -y ffmpeg libsm6 libxext6 libxrender-dev
-      
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends \
+            ffmpeg libsm6 libxext6 libxrender-dev
+
       - name: Install Python dependencies
         run: |
           python -m pip install --upgrade pip setuptools wheel
-          pip install --no-cache-dir -r requirements.txt
-      
+          # --only-binary=:all: forces prebuilt wheels, avoids source builds
+          # (e.g. pydantic-core Rust builds which take 5-10 minutes)
+          pip install --only-binary=:all: -r requirements.txt
+
       - name: Install Playwright browsers
         run: |
-          python -m playwright install chromium
-          python -m playwright install-deps chromium
-      
+          python -m playwright install --with-deps chromium
+
       - name: Verify imports
         run: |
           python -c "from playwright.sync_api import sync_playwright; print('Playwright imported OK')"
           python -c "from moviepy.editor import VideoFileClip; print('MoviePy imported OK')"
           ffmpeg -version | head -1
-      
+
       - name: Run script
         env:
           YOUTUBE_CLIENT_ID: ${{ secrets.YOUTUBE_CLIENT_ID }}
