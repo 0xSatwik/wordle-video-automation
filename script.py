@@ -2002,12 +2002,20 @@ else:
             if 0 <= ist_hour < 7:
                 # Schedule for today at 7 AM IST = 1:30 UTC
                 target_utc = utc_now.replace(hour=1, minute=30, second=0, microsecond=0)
-                if target_utc <= utc_now:
-                    target_utc = target_utc + timedelta(days=1)
-                publish_at = target_utc.strftime("%Y-%m-%dT%H:%M:%SZ")
-                status_body['publishAt'] = publish_at
-                status_body['selfDeclaredMadeForKids'] = False
-                print(f"[seo] Premiere scheduled for: {publish_at} UTC (7 AM IST)")
+                # YouTube requires publishAt to be in the FUTURE (with a small
+                # safety margin of 5 minutes). If the calculated time is in
+                # the past (script ran after 6:55 AM IST), fall back to immediate
+                # publish.
+                min_publish_time = utc_now + timedelta(minutes=5)
+                if target_utc <= min_publish_time:
+                    # Time already passed — publish immediately
+                    print(f"[seo] Premiere time already passed (UTC {target_utc:%H:%M}); "
+                          f"publishing immediately")
+                else:
+                    publish_at = target_utc.strftime("%Y-%m-%dT%H:%M:%SZ")
+                    status_body['publishAt'] = publish_at
+                    status_body['selfDeclaredMadeForKids'] = False
+                    print(f"[seo] Premiere scheduled for: {publish_at} UTC (7 AM IST)")
         except Exception as e:
             print(f"[seo] Premiere scheduling skipped: {e}")
 
