@@ -27,9 +27,11 @@ jobs:
       - name: Install Python dependencies
         run: |
           python -m pip install --upgrade pip setuptools wheel
-          # --only-binary=:all: forces prebuilt wheels, avoids source builds
-          # (e.g. pydantic-core Rust builds which take 5-10 minutes)
-          pip install --only-binary=:all: -r requirements.txt
+          # --prefer-binary uses prebuilt wheels when available, falls back
+          # to source for pure-Python packages like moviepy 1.0.3.
+          # (We previously tried --only-binary=:all: but moviepy 1.0.3 has
+          # no wheel for Python 3.11, so pip could not install it.)
+          pip install --prefer-binary -r requirements.txt
 
       - name: Install Playwright browsers
         run: |
