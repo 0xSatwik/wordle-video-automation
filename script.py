@@ -292,20 +292,289 @@ def generate_daily_thumbnail(out_path, puzzle_num, date_str, partial_letters=Non
         return False
 
 
+def _load_fonts():
+    """Load Pillow fonts at multiple sizes. Returns dict of font objects."""
+    font_paths = [
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+        "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf",
+    ]
+    out = {}
+    for fp in font_paths:
+        if os.path.exists(fp):
+            try:
+                out['title'] = ImageFont.truetype(fp, 80)
+                out['body'] = ImageFont.truetype(fp, 44)
+                out['small'] = ImageFont.truetype(fp, 32)
+                out['tile'] = ImageFont.truetype(fp, 100)
+                return out
+            except Exception:
+                continue
+    default = ImageFont.load_default()
+    return {'title': default, 'body': default, 'small': default, 'tile': default}
+
+
+def generate_hints_segment_image(out_path, puzzle_num, date_str, hints, solution):
+    """Generate a 1920x1080 image showing 3 progressive hints."""
+    try:
+        W, H = 1920, 1080
+        bg = (15, 23, 42)
+        text_color = (255, 255, 255)
+        accent = (34, 197, 94)
+        yellow = (234, 179, 8)
+        img = Image.new("RGB", (W, H), bg)
+        draw = ImageDraw.Draw(img)
+        fonts = _load_fonts()
+
+        # Header
+        draw.text((W // 2 - 400, 80), f"3 HINTS — Wordle #{puzzle_num}",
+                  fill=accent, font=fonts['title'])
+        draw.text((W // 2 - 200, 180), date_str, fill=text_color, font=fonts['small'])
+
+        # Three hint cards
+        card_w, card_h = 540, 380
+        card_y = 320
+        gap = 60
+        total_w = card_w * 3 + gap * 2
+        start_x = (W - total_w) // 2
+        for i, hint in enumerate(hints):
+            x = start_x + i * (card_w + gap)
+            # Card background
+            draw.rectangle([x, card_y, x + card_w, card_y + card_h],
+                          fill=(30, 41, 59))
+            # Number circle
+            cx, cy = x + 80, card_y + 80
+            draw.ellipse([cx - 40, cy - 40, cx + 40, cy + 40], fill=yellow)
+            draw.text((cx - 15, cy - 30), str(i + 1), fill=(0, 0, 0),
+                     font=fonts['body'])
+            # Hint text (wrap)
+            lines = []
+            words = hint.split()
+            cur = ""
+            for w in words:
+                test = (cur + " " + w).strip()
+                if len(test) > 25:
+                    if cur:
+                        lines.append(cur)
+                    cur = w
+                else:
+                    cur = test
+            if cur:
+                lines.append(cur)
+            ty = card_y + 160
+            for line in lines:
+                draw.text((x + 30, ty), line, fill=text_color, font=fonts['body'])
+                ty += 60
+
+        # Footer hint
+        draw.text((W // 2 - 350, H - 100),
+                  "Can you guess the word before the solve?",
+                  fill=yellow, font=fonts['small'])
+
+        img.save(out_path, "PNG", optimize=True)
+        return True
+    except Exception as e:
+        print(f"[hints_image] Failed: {e}")
+        return False
+
+
+def generate_word_analysis_image(out_path, puzzle_num, solution, dict_info,
+                                  letter_freq):
+    """Generate a 1920x1080 image showing word definition + analysis."""
+    try:
+        W, H = 1920, 1080
+        bg = (15, 23, 42)
+        text_color = (255, 255, 255)
+        accent = (34, 197, 94)
+        yellow = (234, 179, 8)
+        img = Image.new("RGB", (W, H), bg)
+        draw = ImageDraw.Draw(img)
+        fonts = _load_fonts()
+
+        # Header
+        draw.text((W // 2 - 500, 60), "WORD ANALYSIS", fill=accent, font=fonts['title'])
+
+        # Big solution word
+        draw.text((W // 2 - 200, 180), solution.upper(),
+                  fill=yellow, font=fonts['tile'])
+
+        # Definition box
+        box_y = 360
+        draw.rectangle([100, box_y, W - 100, box_y + 360],
+                      fill=(30, 41, 59))
+
+        if dict_info:
+            pos = dict_info.get("part_of_speech", "")
+            defn = dict_info.get("definition", "(no definition available)")
+            example = dict_info.get("example", "")
+            synonyms = dict_info.get("synonyms", [])
+
+            y = box_y + 30
+            if pos:
+                draw.text((130, y), f"Part of speech: {pos}",
+                         fill=accent, font=fonts['body'])
+                y += 70
+            # Definition (word-wrapped)
+            draw.text((130, y), "Definition:", fill=text_color, font=fonts['body'])
+            y += 70
+            # Wrap definition
+            words = defn.split()
+            lines = []
+            cur = ""
+            for w in words:
+                test = (cur + " " + w).strip()
+                if len(test) > 60:
+                    if cur:
+                        lines.append(cur)
+                    cur = w
+                else:
+                    cur = test
+            if cur:
+                lines.append(cur)
+            for line in lines[:4]:
+                draw.text((160, y), line, fill=text_color, font=fonts['body'])
+                y += 55
+            if example:
+                y += 20
+                draw.text((130, y), f"Example: \"{example[:80]}\"",
+                         fill=accent, font=fonts['small'])
+                y += 50
+            if synonyms:
+                y += 10
+                draw.text((130, y), f"Synonyms: {', '.join(synonyms[:5])}",
+                         fill=yellow, font=fonts['small'])
+        else:
+            draw.text((130, box_y + 100), "(Dictionary entry not available)",
+                     fill=text_color, font=fonts['body'])
+
+        # Letter frequency stats
+        if letter_freq:
+            stats_y = 760
+            draw.text((130, stats_y),
+                     f"Letter rarity: {letter_freq['tier']} "
+                     f"(avg English freq: {letter_freq['avg_freq']}%)",
+                     fill=accent, font=fonts['body'])
+            letters_upper = ", ".join(c.upper() for c in letter_freq['letters'])
+            draw.text((130, stats_y + 70),
+                     f"Unique letters: {letters_upper}",
+                     fill=text_color, font=fonts['body'])
+
+        img.save(out_path, "PNG", optimize=True)
+        return True
+    except Exception as e:
+        print(f"[analysis_image] Failed: {e}")
+        return False
+
+
+def generate_yesterday_recap_image(out_path, yesterday_info):
+    """Generate a 1920x1080 image showing yesterday's solution recap."""
+    try:
+        W, H = 1920, 1080
+        bg = (15, 23, 42)
+        text_color = (255, 255, 255)
+        accent = (34, 197, 94)
+        yellow = (234, 179, 8)
+        img = Image.new("RGB", (W, H), bg)
+        draw = ImageDraw.Draw(img)
+        fonts = _load_fonts()
+
+        # Header
+        draw.text((W // 2 - 400, 200), "YESTERDAY'S WORDLE",
+                  fill=accent, font=fonts['title'])
+
+        if yesterday_info:
+            num = yesterday_info.get('num', '?')
+            word = yesterday_info.get('word', '?????').upper()
+            date = yesterday_info.get('date', '')
+
+            draw.text((W // 2 - 100, 360), f"#{num}",
+                     fill=yellow, font=fonts['body'])
+            # Big word
+            draw.text((W // 2 - 250, 460), word,
+                     fill=accent, font=fonts['tile'])
+            if date:
+                draw.text((W // 2 - 100, 620), date,
+                         fill=text_color, font=fonts['small'])
+            draw.text((W // 2 - 350, 720),
+                     "Did you get it?",
+                     fill=text_color, font=fonts['body'])
+            draw.text((W // 2 - 400, 820),
+                     "Comment your result below!",
+                     fill=yellow, font=fonts['body'])
+        else:
+            draw.text((W // 2 - 200, 460), "(no data)",
+                     fill=text_color, font=fonts['body'])
+
+        img.save(out_path, "PNG", optimize=True)
+        return True
+    except Exception as e:
+        print(f"[recap_image] Failed: {e}")
+        return False
+
+
+def generate_tomorrow_teaser_image(out_path, tomorrow_info, puzzle_num):
+    """Generate a 1920x1080 image showing tomorrow's puzzle teaser."""
+    try:
+        W, H = 1920, 1080
+        bg = (15, 23, 42)
+        text_color = (255, 255, 255)
+        accent = (34, 197, 94)
+        yellow = (234, 179, 8)
+        img = Image.new("RGB", (W, H), bg)
+        draw = ImageDraw.Draw(img)
+        fonts = _load_fonts()
+
+        # Header
+        draw.text((W // 2 - 350, 200), "TOMORROW'S TEASER",
+                  fill=accent, font=fonts['title'])
+
+        if tomorrow_info:
+            num = tomorrow_info.get('num', puzzle_num + 1)
+            word = tomorrow_info.get('word', '?????')
+            first_letter = word[0].upper() if word else '?'
+
+            draw.text((W // 2 - 100, 360), f"#{num}",
+                     fill=yellow, font=fonts['body'])
+            # Big first letter
+            draw.text((W // 2 - 70, 460), first_letter,
+                     fill=accent, font=fonts['tile'])
+            draw.text((W // 2 - 350, 620), "_ _ _ _ _",
+                     fill=text_color, font=fonts['tile'])
+            draw.text((W // 2 - 300, 820),
+                     "First letter revealed — see you tomorrow!",
+                     fill=yellow, font=fonts['body'])
+        else:
+            draw.text((W // 2 - 200, 460), "(no data)",
+                     fill=text_color, font=fonts['body'])
+
+        img.save(out_path, "PNG", optimize=True)
+        return True
+    except Exception as e:
+        print(f"[teaser_image] Failed: {e}")
+        return False
+
+
 def build_chapters_description(video_date, puzzle_num, solve_rounds,
                                 solution, dict_info, letter_freq,
                                 ytd_info, puzzle_date=""):
-    """Build the SEO-optimized description WITH chapters."""
-    # Base chapters (always present)
+    """Build the SEO-optimized description WITH chapters.
+
+    Chapter timestamps reflect the actual video structure:
+      0:00  Intro (5s)
+      0:05  Yesterday's recap (5s)
+      0:10  3 hints (10s)
+      0:20  The solve begins (gameplay, ~90s)
+      ~1:50 Outro (5s)
+      ~1:55 Word analysis (15s)
+      ~2:10 Tomorrow's teaser (5s)
+    """
     chapters = [
-        ("0:00", "Can you solve it?"),
-        ("0:15", "3 hints before the answer"),
-        ("0:35", "The solve begins"),
-        ("2:05", "Word analysis & definition"),
-        ("2:30", "Letter frequency stats"),
-        ("2:50", "WordleBot comparison"),
-        ("3:00", "Streak update"),
-        ("3:10", "Tomorrow's teaser"),
+        ("0:00", "Intro"),
+        ("0:05", "Yesterday's Wordle recap"),
+        ("0:10", "3 hints before the answer"),
+        ("0:20", "The solve begins"),
+        ("1:50", "Word analysis & definition"),
+        ("2:05", "Letter frequency stats"),
+        ("2:10", "Tomorrow's teaser"),
     ]
     chapter_lines = [f"{ts} {title}" for ts, title in chapters]
     chapters_str = "\n".join(chapter_lines)
@@ -1885,23 +2154,96 @@ try:
     except Exception as e:
         print(f"[tts] Voiceover workflow failed: {e}")
 
-    # 6. FINAL ASSEMBLY (Intro + Main Content)
+    # 6. FINAL ASSEMBLY (Intro + Yesterday Recap + Hints + Main Content + Word Analysis + Tomorrow Teaser)
+    # New content segments (each ~5-15s) to extend video to 3-4 minutes:
+    #   - Yesterday recap (5s, before gameplay)
+    #   - 3 Progressive hints (10s, before gameplay)
+    #   - Word analysis (15s, after gameplay/outro)
+    #   - Tomorrow's teaser (5s, at end)
     final_parts = []
     if intro_clip:
         final_parts.append(intro_clip)
+
+    # 6a. YESTERDAY RECAP SEGMENT (5 seconds)
+    try:
+        if ytd_info.get("yesterday"):
+            recap_img_path = os.path.join(base_dir, f"recap_{puzzle_date}.png")
+            if generate_yesterday_recap_image(recap_img_path, ytd_info["yesterday"]):
+                recap_clip = ImageClip(recap_img_path).set_duration(5).set_fps(24).resize(width=1920, height=1080)
+                final_parts.append(recap_clip)
+                print("[recap] Added yesterday's solution recap segment (5s)")
+                try:
+                    os.remove(recap_img_path)
+                except Exception:
+                    pass
+    except Exception as e:
+        print(f"[recap] Segment failed: {e}")
+
+    # 6b. HINTS SEGMENT (10 seconds)
+    try:
+        hints_list = compute_hints(known_solution) if known_solution else []
+        if hints_list:
+            hints_img_path = os.path.join(base_dir, f"hints_{puzzle_date}.png")
+            if generate_hints_segment_image(hints_img_path, puzzle_num, video_date, hints_list, known_solution):
+                hints_clip = ImageClip(hints_img_path).set_duration(10).set_fps(24).resize(width=1920, height=1080)
+                final_parts.append(hints_clip)
+                print("[hints] Added 3 progressive hints segment (10s)")
+                try:
+                    os.remove(hints_img_path)
+                except Exception:
+                    pass
+    except Exception as e:
+        print(f"[hints] Segment failed: {e}")
+
     if main_content_clip:
         final_parts.append(main_content_clip)
-        
+
+    # 6c. WORD ANALYSIS SEGMENT (15 seconds, after gameplay/outro)
+    try:
+        if known_solution:
+            analysis_img_path = os.path.join(base_dir, f"analysis_{puzzle_date}.png")
+            if generate_word_analysis_image(analysis_img_path, puzzle_num, known_solution, dict_info, letter_freq_info):
+                analysis_clip = ImageClip(analysis_img_path).set_duration(15).set_fps(24).resize(width=1920, height=1080)
+                final_parts.append(analysis_clip)
+                print("[analysis] Added word analysis segment (15s)")
+                try:
+                    os.remove(analysis_img_path)
+                except Exception:
+                    pass
+    except Exception as e:
+        print(f"[analysis] Segment failed: {e}")
+
+    # 6d. TOMORROW TEASER SEGMENT (5 seconds, at end)
+    try:
+        if ytd_info.get("tomorrow"):
+            teaser_img_path = os.path.join(base_dir, f"teaser_{puzzle_date}.png")
+            if generate_tomorrow_teaser_image(teaser_img_path, ytd_info["tomorrow"], puzzle_num):
+                teaser_clip = ImageClip(teaser_img_path).set_duration(5).set_fps(24).resize(width=1920, height=1080)
+                final_parts.append(teaser_clip)
+                print("[teaser] Added tomorrow's teaser segment (5s)")
+                try:
+                    os.remove(teaser_img_path)
+                except Exception:
+                    pass
+    except Exception as e:
+        print(f"[teaser] Segment failed: {e}")
+
     if final_parts:
         final_clip = concatenate_videoclips(final_parts, method="compose")
         print("Final video assembled.")
+        print(f"[video] Total segments: {len(final_parts)}")
+        for i, part in enumerate(final_parts):
+            try:
+                print(f"  Segment {i+1}: {part.duration:.1f}s")
+            except Exception:
+                pass
     else:
         final_clip = gameplay_clip # Fallback if everything failed
 
     final_clip.write_videofile(final_video_file, codec='libx264', audio_codec='aac', fps=24)
     final_clip.close()
     gameplay_clip.close()
-    
+
     # Clean up webm
     if os.path.exists(recorded_video_path):
         os.remove(recorded_video_path)
@@ -2061,23 +2403,64 @@ else:
         print(f'✅ Video uploaded: https://youtu.be/{video_id}')
 
         # ====================================================================
-        # POST-UPLOAD ENRICHMENT (all wrapped defensively)
-        # Skip if enrichment_enabled is False (token only has upload scope).
+        # POST-UPLOAD STEPS
+        # Some features need only youtube.upload scope (already granted):
+        #   - Custom thumbnail upload (also requires channel verification)
+        #   - YouTube Shorts upload (separate video insert)
+        # Some features need broader scopes (skip if enrichment_enabled=False):
+        #   - Playlists (needs youtube scope)
+        #   - Pinned comment (needs youtube.force-ssl scope)
+        #   - Streak counter search (needs youtube scope)
         # ====================================================================
 
-        if not enrichment_enabled:
-            print("[enrichment] Skipped — token only has youtube.upload scope.")
-            print("[enrichment] To enable playlists/comments/thumbnails/Shorts,")
-            print("[enrichment] re-run get_refresh_token.py with broader scopes.")
-        else:
-            # 1. Set custom thumbnail (requires channel verified for custom thumbnails)
+        # 1. Set custom thumbnail (needs youtube.upload scope + channel verified)
+        # This works with the current token IF the channel is verified.
+        try:
             if os.path.exists(thumbnail_path):
                 youtube_set_thumbnail(youtube, video_id, thumbnail_path)
+        except Exception as e:
+            print(f"[thumbnail] Upload failed: {e}")
 
-            # 2. Add to playlists (monthly + yearly)
+        # 2. Create and upload YouTube Shorts version (needs youtube.upload scope only)
+        # We DO have this scope, so this should always work.
+        try:
+            shorts_path = os.path.join(base_dir, f'wordle_shorts_{puzzle_date}.mp4')
+            if make_short_clip_from_video(final_video_file, shorts_path, max_duration=45):
+                shorts_body = {
+                    'snippet': {
+                        'title': f"Wordle #{puzzle_num} in 45 seconds ⚡ ({video_date.split(',')[0]})",
+                        'description': (
+                            f"Quick solve of Wordle #{puzzle_num}!\n\n"
+                            f"Full video with hints & analysis: https://youtu.be/{video_id}\n\n"
+                            f"#Wordle #Shorts #WordleAnswer"
+                        ),
+                        'tags': ['Wordle', 'Shorts', 'Wordle Answer', f'Wordle #{puzzle_num}'],
+                        'categoryId': '20',
+                    },
+                    'status': {'privacyStatus': 'unlisted'},  # avoid duplicate penalty
+                }
+                shorts_media = MediaFileUpload(shorts_path, mimetype='video/mp4', resumable=True)
+                shorts_resp = youtube.videos().insert(
+                    part='snippet,status', body=shorts_body, media_body=shorts_media
+                ).execute()
+                print(f"[short] Shorts version uploaded: https://youtu.be/{shorts_resp['id']} (unlisted)")
+                try:
+                    os.remove(shorts_path)
+                except Exception:
+                    pass
+        except Exception as e:
+            print(f"[short] Workflow failed: {e}")
+
+        # 3. Broader-scope enrichment (playlists, comments, streak)
+        if not enrichment_enabled:
+            print("[enrichment] Skipped — token only has youtube.upload scope.")
+            print("[enrichment] To enable playlists/comments/streak, re-run")
+            print("[enrichment] get_refresh_token.py with broader scopes.")
+        else:
+            # 3a. Add to playlists (monthly + yearly)
             try:
                 year = ist_now.year
-                month_name = ist_now.strftime("%B %Y")  # e.g., "August 2026"
+                month_name = ist_now.strftime("%B %Y")
                 playlists_to_add = [
                     (f"Wordle Answers — {month_name}",
                      f"Daily Wordle solution videos for {month_name}."),
@@ -2091,7 +2474,7 @@ else:
             except Exception as e:
                 print(f"[playlist] Workflow failed: {e}")
 
-            # 3. Post pinned comment with chapter timestamps + question CTA
+            # 3b. Post pinned comment
             try:
                 comment_text = (
                     f"What was your first guess today? 🤔\n\n"
@@ -2110,44 +2493,12 @@ else:
             except Exception as e:
                 print(f"[comment] Workflow failed: {e}")
 
-            # 4. Streak counter (just log it for now; overlay is in video itself)
+            # 3c. Streak counter
             try:
                 streak_count = youtube_count_recent_uploads(youtube, days=365)
                 print(f"[streak] ~{streak_count} videos uploaded in last 365 days")
             except Exception as e:
                 print(f"[streak] Failed: {e}")
-
-            # 5. Create and upload YouTube Shorts version (30s hint+reveal)
-            try:
-                shorts_path = os.path.join(base_dir, f'wordle_shorts_{puzzle_date}.mp4')
-                if make_short_clip_from_video(final_video_file, shorts_path, max_duration=45):
-                    # Upload as a separate Short (stays private — main video is the focus)
-                    # We mark it as 'unlisted' to avoid duplicate-content penalty.
-                    shorts_body = {
-                        'snippet': {
-                            'title': f"Wordle #{puzzle_num} in 45 seconds ⚡ ({video_date.split(',')[0]})",
-                            'description': (
-                                f"Quick solve of Wordle #{puzzle_num}!\n\n"
-                                f"Full video with hints & analysis: https://youtu.be/{video_id}\n\n"
-                                f"#Wordle #Shorts #WordleAnswer"
-                            ),
-                            'tags': ['Wordle', 'Shorts', 'Wordle Answer', f'Wordle #{puzzle_num}'],
-                            'categoryId': '20',
-                        },
-                        'status': {'privacyStatus': 'unlisted'},  # avoid duplicate penalty
-                    }
-                    shorts_media = MediaFileUpload(shorts_path, mimetype='video/mp4', resumable=True)
-                    shorts_resp = youtube.videos().insert(
-                        part='snippet,status', body=shorts_body, media_body=shorts_media
-                    ).execute()
-                    print(f"[short] Shorts version uploaded: https://youtu.be/{shorts_resp['id']} (unlisted)")
-                    # Clean up shorts file
-                    try:
-                        os.remove(shorts_path)
-                    except Exception:
-                        pass
-            except Exception as e:
-                print(f"[short] Workflow failed: {e}")
 
     except Exception as e:
         if "uploadLimitExceeded" in str(e):
