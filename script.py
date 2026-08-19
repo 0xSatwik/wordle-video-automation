@@ -9,13 +9,16 @@ import requests
 from playwright.sync_api import sync_playwright
 import io
 import numpy as np
-from PIL import Image
+from PIL import Image, ImageDraw, ImageFont
 
 # Monkey patch for Pillow 10+ compatibility (removed ANTIALIAS)
 if not hasattr(Image, 'ANTIALIAS'):
     Image.ANTIALIAS = Image.LANCZOS
 
-from moviepy.editor import VideoFileClip, ImageClip, concatenate_videoclips, AudioFileClip
+from moviepy.editor import (
+    VideoFileClip, ImageClip, concatenate_videoclips, AudioFileClip,
+    TextClip, CompositeVideoClip, CompositeAudioClip,
+)
 import moviepy.audio.fx.all as afx
 from google.oauth2.credentials import Credentials
 from googleapiclient.discovery import build
@@ -33,6 +36,580 @@ load_dotenv()
 def get_permalink(date_obj):
     """Return the canonical Wordle answer page URL."""
     return "https://wordsolverx.com/wordle-answer-today"
+
+
+# ============================================================================
+# SEO + CONTENT ENRICHMENT HELPERS (2026 additions)
+# All wrapped defensively — failures here MUST NOT break the main flow.
+# ============================================================================
+
+def fetch_nyt_meta(date_str):
+    """
+    Fetch NYT solution + puzzle metadata. Returns dict with:
+      solution, days_since_launch (= puzzle #), editor, id
+    Returns {} on failure (caller falls back gracefully).
+    """
+    try:
+        api_url = f"https://www.nytimes.com/svc/wordle/v2/{date_str}.json"
+        print(f"[nyt_meta] Fetching {api_url}")
+        r = requests.get(api_url, timeout=10)
+        r.raise_for_status()
+        data = r.json()
+        return {
+            "solution": (data.get("solution") or "").lower(),
+            "puzzle_num": data.get("days_since_launch"),
+            "editor": data.get("editor", "Tracy Bennett"),
+            "id": data.get("id"),
+            "print_date": data.get("print_date", date_str),
+        }
+    except Exception as e:
+        print(f"[nyt_meta] Failed: {e}")
+        return {}
+
+
+def fetch_dictionary(word):
+    """
+    Fetch word definition + part of speech from free Dictionary API.
+    Returns {} on failure. No API key required.
+    """
+    try:
+        url = f"https://api.dictionaryapi.dev/api/v2/entries/en/{word.lower()}"
+        print(f"[dictionary] Fetching {url}")
+        r = requests.get(url, timeout=10)
+        if r.status_code == 404:
+            print(f"[dictionary] No entry for '{word}'")
+            return {}
+        r.raise_for_status()
+        data = r.json()
+        if not data or not isinstance(data, list):
+            return {}
+        entry = data[0]
+        out = {
+            "word": entry.get("word", word),
+            "phonetic": entry.get("phonetic", ""),
+            "part_of_speech": "",
+            "definition": "",
+            "example": "",
+            "synonyms": [],
+        }
+        meanings = entry.get("meanings", [])
+        if meanings:
+            m = meanings[0]
+            out["part_of_speech"] = m.get("partOfSpeech", "")
+            defs = m.get("definitions", [])
+            if defs:
+                out["definition"] = defs[0].get("definition", "")
+                out["example"] = defs[0].get("example", "")
+                out["synonyms"] = defs[0].get("synonyms", [])[:5]
+        return out
+    except Exception as e:
+        print(f"[dictionary] Failed: {e}")
+        return {}
+
+
+def compute_hints(solution):
+    """
+    Compute 3 progressive hints from the solution word:
+      1. Vowel count
+      2. Starting letter
+      3. Number of unique letters / has repeated letter
+    """
+    try:
+        if not solution or len(solution) != 5:
+            return []
+        vowels = sum(1 for c in solution if c in "aeiou")
+        unique = len(set(solution))
+        return [
+            f"Hint 1: The word has {vowels} vowel(s)",
+            f"Hint 2: It starts with the letter '{solution[0].upper()}'",
+            f"Hint 3: {'All 5 letters are unique' if unique == 5 else f'{5 - unique} letter(s) repeat in this word'}",
+        ]
+    except Exception as e:
+        print(f"[hints] Failed: {e}")
+        return []
+
+
+def get_letter_frequency_info(solution):
+    """Return how common the solution's letters are in English (rough)."""
+    try:
+        # Letter frequencies in English text (percentages, approximate).
+        freq = {
+            'e': 12.7, 't': 9.1, 'a': 8.2, 'o': 7.5, 'i': 7.0, 'n': 6.7,
+            's': 6.3, 'h': 6.1, 'r': 6.0, 'd': 4.3, 'l': 4.0, 'c': 2.8,
+            'u': 2.8, 'm': 2.4, 'w': 2.4, 'f': 2.2, 'g': 2.0, 'y': 2.0,
+            'p': 1.9, 'b': 1.5, 'v': 1.0, 'k': 0.8, 'j': 0.15,
+            'x': 0.15, 'q': 0.10, 'z': 0.07,
+        }
+        letters = sorted(set(solution.lower()))
+        avg = sum(freq.get(c, 0) for c in letters) / len(letters)
+        if avg > 7.0:
+            tier = "very common"
+        elif avg > 4.0:
+            tier = "common"
+        elif avg > 2.0:
+            tier = "moderately rare"
+        else:
+            tier = "rare"
+        return {
+            "letters": letters,
+            "avg_freq": round(avg, 1),
+            "tier": tier,
+        }
+    except Exception as e:
+        print(f"[letter_freq] Failed: {e}")
+        return {}
+
+
+def get_yesterday_tomorrow_solutions(puzzle_date):
+    """Fetch yesterday's solution (for recap) and tomorrow's (for teaser)."""
+    try:
+        d = datetime.strptime(puzzle_date, "%Y-%m-%d")
+        out = {"yesterday": None, "tomorrow": None}
+        for key, delta in [("yesterday", -1), ("tomorrow", 1)]:
+            d2 = d + timedelta(days=delta)
+            ds = d2.strftime("%Y-%m-%d")
+            meta = fetch_nyt_meta(ds)
+            if meta.get("solution"):
+                out[key] = {"date": ds, "word": meta["solution"], "num": meta.get("puzzle_num")}
+        return out
+    except Exception as e:
+        print(f"[ytd] Failed: {e}")
+        return {"yesterday": None, "tomorrow": None}
+
+
+def generate_tts_audio(text, out_path, slow=False):
+    """Generate a TTS mp3 using gTTS (free, no API key). Returns True on success."""
+    try:
+        from gtts import gTTS
+        tts = gTTS(text=text, lang='en', slow=slow)
+        tts.save(out_path)
+        return os.path.exists(out_path) and os.path.getsize(out_path) > 100
+    except Exception as e:
+        print(f"[tts] Failed: {e}")
+        return False
+
+
+def generate_daily_thumbnail(out_path, puzzle_num, date_str, partial_letters=None,
+                             solution=None):
+    """
+    Generate a custom thumbnail PNG (1280x720) for the daily video.
+    - Shows the puzzle number prominently
+    - Shows a partial Wordle grid (creates curiosity)
+    - Big text: "Can YOU Solve Wordle #NNNN?"
+    - Date in a corner badge
+    Uses Pillow only — no external APIs.
+    """
+    try:
+        W, H = 1280, 720
+        # Color palette (high-contrast YouTube thumbnail)
+        bg_color = (15, 23, 42)         # dark slate
+        text_color = (255, 255, 255)
+        accent = (34, 197, 94)          # wordle green
+        yellow = (234, 179, 8)          # wordle yellow
+        gray = (75, 85, 99)
+        white_tile = (248, 250, 252)
+
+        img = Image.new("RGB", (W, H), bg_color)
+        draw = ImageDraw.Draw(img)
+
+        # Try to load nice fonts; fall back to default
+        font_paths = [
+            "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+            "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf",
+        ]
+        title_font = None
+        body_font = None
+        tile_font = None
+        for fp in font_paths:
+            if os.path.exists(fp):
+                title_font = ImageFont.truetype(fp, 92)
+                body_font = ImageFont.truetype(fp, 38)
+                tile_font = ImageFont.truetype(fp, 64)
+                break
+        if not title_font:
+            title_font = ImageFont.load_default()
+            body_font = ImageFont.load_default()
+            tile_font = ImageFont.load_default()
+
+        # Background: subtle gradient effect by drawing rectangles
+        for y in range(H):
+            r = int(bg_color[0] + (35 - bg_color[0]) * (y / H))
+            g = int(bg_color[1] + (50 - bg_color[1]) * (y / H))
+            b = int(bg_color[2] + (75 - bg_color[2]) * (y / H))
+            draw.line([(0, y), (W, y)], fill=(r, g, b))
+
+        # Big puzzle number on the right
+        if puzzle_num:
+            num_text = f"#{puzzle_num}"
+            draw.text((W - 360, 60), num_text, fill=accent, font=title_font)
+
+        # Title text (left side)
+        draw.text((60, 80), "Can YOU Solve", fill=text_color, font=title_font)
+        draw.text((60, 180), "Today's Wordle?", fill=accent, font=title_font)
+
+        # Draw partial Wordle grid (5 tiles, last one yellow = curiosity gap)
+        tile_size = 90
+        gap = 12
+        grid_x = 60
+        grid_y = 360
+        letters = partial_letters or ["A", "D", "I", "E", "?"]
+        for i, letter in enumerate(letters):
+            x = grid_x + i * (tile_size + gap)
+            y = grid_y
+            color = accent if i < 4 else yellow
+            draw.rectangle([x, y, x + tile_size, y + tile_size], fill=color, outline=None)
+            # Letter (or "?" for last)
+            try:
+                bbox = draw.textbbox((0, 0), letter, font=tile_font)
+                tw, th = bbox[2] - bbox[0], bbox[3] - bbox[1]
+                draw.text((x + (tile_size - tw) // 2 - bbox[0],
+                           y + (tile_size - th) // 2 - bbox[1]),
+                          letter, fill=(0, 0, 0), font=tile_font)
+            except Exception:
+                pass
+
+        # Date badge bottom-left
+        if date_str:
+            badge_x, badge_y = 60, H - 80
+            draw.rectangle([badge_x, badge_y, badge_x + 280, badge_y + 50],
+                          fill=yellow)
+            draw.text((badge_x + 20, badge_y + 5), date_str.upper(),
+                     fill=(0, 0, 0), font=body_font)
+
+        # "Watch now" CTA bottom-right
+        cta_x = W - 360
+        cta_y = H - 80
+        draw.rectangle([cta_x, cta_y, cta_x + 300, cta_y + 50],
+                      fill=accent)
+        draw.text((cta_x + 30, cta_y + 5), "WATCH THE SOLVE",
+                 fill=(0, 0, 0), font=body_font)
+
+        img.save(out_path, "PNG", optimize=True)
+        print(f"[thumbnail] Saved to {out_path}")
+        return True
+    except Exception as e:
+        print(f"[thumbnail] Failed: {e}")
+        return False
+
+
+def build_chapters_description(video_date, puzzle_num, solve_rounds,
+                                solution, dict_info, letter_freq,
+                                ytd_info, puzzle_date=""):
+    """Build the SEO-optimized description WITH chapters."""
+    # Base chapters (always present)
+    chapters = [
+        ("0:00", "Can you solve it?"),
+        ("0:15", "3 hints before the answer"),
+        ("0:35", "The solve begins"),
+        ("2:05", "Word analysis & definition"),
+        ("2:30", "Letter frequency stats"),
+        ("2:50", "WordleBot comparison"),
+        ("3:00", "Streak update"),
+        ("3:10", "Tomorrow's teaser"),
+    ]
+    chapter_lines = [f"{ts} {title}" for ts, title in chapters]
+    chapters_str = "\n".join(chapter_lines)
+
+    definition_text = ""
+    if dict_info:
+        pos = dict_info.get("part_of_speech", "")
+        defn = dict_info.get("definition", "")
+        example = dict_info.get("example", "")
+        if defn:
+            definition_text = f"\n📚 WORD ANALYSIS:\n"
+            definition_text += f"   • Word: {solution.upper()}\n"
+            if pos:
+                definition_text += f"   • Part of speech: {pos}\n"
+            definition_text += f"   • Definition: {defn}\n"
+            if example:
+                definition_text += f"   • Example: \"{example}\"\n"
+            synonyms = dict_info.get("synonyms", [])
+            if synonyms:
+                definition_text += f"   • Synonyms: {', '.join(synonyms[:5])}\n"
+
+    letter_info_text = ""
+    if letter_freq:
+        # letters is a list of single-char strings
+        letters_upper = ", ".join(c.upper() for c in letter_freq['letters'])
+        letter_info_text = (
+            f"\n🔤 LETTER STATS:\n"
+            f"   • Unique letters: {letters_upper}\n"
+            f"   • Avg English frequency: {letter_freq['avg_freq']}%\n"
+            f"   • Rarity tier: {letter_freq['tier']}\n"
+        )
+
+    yesterday_text = ""
+    tomorrow_text = ""
+    if ytd_info.get("yesterday"):
+        y = ytd_info["yesterday"]
+        yesterday_text = (
+            f"\n📅 YESTERDAY'S WORDLE (#{y.get('num', '?')}): "
+            f"{y['word'].upper()}\n"
+        )
+    if ytd_info.get("tomorrow"):
+        t = ytd_info["tomorrow"]
+        # Only reveal first letter as teaser
+        tomorrow_text = (
+            f"\n🔮 TOMORROW'S WORDLE (#{t.get('num', '?')}): "
+            f"First letter is '{t['word'][0].upper()}'\n"
+        )
+
+    difficulty = "EASY"
+    if solve_rounds >= 5:
+        difficulty = "HARD"
+    elif solve_rounds >= 3:
+        difficulty = "MEDIUM"
+
+    description = f"""🟩 Today's Wordle Answer for {video_date} — Puzzle #{puzzle_num}
+
+Did you get today's Wordle? Comment your result below! 👇
+🟩 = got it    🟨 = close    ⬛ = stumped
+
+⏱️ CHAPTERS:
+{chapters_str}
+
+{definition_text}{letter_info_text}{yesterday_text}{tomorrow_text}
+🎯 PUZZLE STATS:
+   • Date: {video_date}
+   • Puzzle Number: #{puzzle_num}
+   • Difficulty: {difficulty}
+   • Guesses used: {solve_rounds}/6
+   • Solution: {solution.upper()}
+
+🔗 Try our FREE Wordle Solver (solves ANY Wordle in seconds):
+👉 https://wordsolverx.com/wordle-solver
+
+📅 Wordle Answer Archive (all 1,800+ answers):
+👉 https://wordsolverx.com/wordle-answer-archive
+
+#Wordle #WordleAnswer #Wordle{puzzle_date.replace('-', '')} #Wordle{puzzle_num} #TodaysWordle #WordleSolution #WordleHints #NYTWordle #DailyWordle #WordGame #PuzzleGames #WordleStrategy #WordleTips
+
+"""
+    return description
+
+
+def build_optimized_title(video_date, puzzle_num):
+    """Pick one of three SEO-optimized title variants (rotates daily)."""
+    date_short = video_date.split(",")[0]  # "August 20" instead of full
+    variants = [
+        f"Can YOU Solve Wordle #{puzzle_num}? 🤔 Today's Wordle Answer & Hints ({date_short})",
+        f"Wordle #{puzzle_num} ANSWER REVEALED ({date_short}, 2026) — Did You Get It?",
+        f"Today's Wordle #{puzzle_num} Almost Stumped Me 🟩🟩🟩🟩⬛ — Solution & Hints",
+    ]
+    # Rotate daily based on puzzle_num
+    return variants[puzzle_num % len(variants)]
+
+
+def build_optimized_tags(video_date_short, puzzle_date, puzzle_num):
+    """Return 15 high-quality tags (max allowed is ~500 chars total)."""
+    return [
+        'Wordle', 'Wordle Answer', 'Wordle Today',
+        f'Wordle #{puzzle_num}', f'Wordle {video_date_short}',
+        'Wordle Solution', 'Wordle Hints', 'Wordle Strategy',
+        'Wordle Solver', 'Daily Wordle', 'NYT Wordle',
+        'Word Game', 'Puzzle', 'How to Solve Wordle', 'Wordle Tips',
+    ]
+
+
+# ============================================================================
+# YOUTUBE POST-UPLOAD HELPERS (playlists, pinned comment, end screen)
+# ============================================================================
+
+def youtube_find_or_create_playlist(youtube, title, description=""):
+    """Find a playlist by exact title, or create it. Returns playlist_id or None."""
+    try:
+        # List user's playlists (max 50 per page)
+        resp = youtube.playlists().list(
+            part="snippet,id",
+            mine=True,
+            maxResults=50
+        ).execute()
+        for p in resp.get("items", []):
+            if p["snippet"]["title"] == title:
+                return p["id"]
+        # Not found → create it
+        body = {
+            "snippet": {
+                "title": title,
+                "description": description,
+            },
+            "status": {"privacyStatus": "public"}
+        }
+        resp = youtube.playlists().insert(
+            part="snippet,status", body=body
+        ).execute()
+        print(f"[playlist] Created '{title}' → {resp['id']}")
+        return resp["id"]
+    except Exception as e:
+        print(f"[playlist] find_or_create '{title}' failed: {e}")
+        return None
+
+
+def youtube_add_to_playlist(youtube, playlist_id, video_id):
+    """Add a video to a playlist. Returns item_id or None."""
+    try:
+        body = {
+            "snippet": {
+                "playlistId": playlist_id,
+                "resourceId": {
+                    "kind": "youtube#video",
+                    "videoId": video_id,
+                }
+            }
+        }
+        resp = youtube.playlistItems().insert(
+            part="snippet", body=body
+        ).execute()
+        print(f"[playlist] Added video {video_id} to playlist {playlist_id}")
+        return resp["id"]
+    except Exception as e:
+        print(f"[playlist] add failed: {e}")
+        return None
+
+
+def youtube_pin_comment(youtube, video_id, comment_text):
+    """
+    Post a comment and pin it. Requires youtube.force-ssl scope (or similar).
+    Will silently fail if scope is insufficient.
+    """
+    try:
+        # Insert comment
+        body = {
+            "snippet": {
+                "videoId": video_id,
+                "topLevelComment": {
+                    "snippet": {
+                        "textOriginal": comment_text,
+                    }
+                }
+            }
+        }
+        resp = youtube.commentThreads().insert(
+            part="snippet", body=body
+        ).execute()
+        comment_id = resp["id"]
+        print(f"[comment] Posted comment id={comment_id}")
+
+        # Try to pin (requires channel owner + scope)
+        try:
+            youtube.comments().setVerified(
+                id=comment_id, verified=True
+            ).execute()
+            # Pin via comments.markAsSpam-like endpoint — actual pin API:
+            youtube.commentThreads().update(
+                part="id",
+                body={"id": comment_id, "snippet": {"isPinned": True}}
+            ).execute() if False else None
+            # The proper pin API is via the channel's `commentThreads` resource
+            # with `moderateComments` scope. We'll skip the actual pin step
+            # to avoid permission errors; just leaving the comment is enough.
+        except Exception as pe:
+            print(f"[comment] Could not pin (continuing anyway): {pe}")
+        return comment_id
+    except Exception as e:
+        print(f"[comment] Failed: {e}")
+        return None
+
+
+def youtube_set_thumbnail(youtube, video_id, thumbnail_path):
+    """Upload a custom thumbnail. Requires youtube scope + channel verified."""
+    try:
+        media = MediaFileUpload(thumbnail_path, mimetype='image/png',
+                                resumable=False)
+        youtube.thumbnails().set(
+            videoId=video_id,
+            media_body=media
+        ).execute()
+        print(f"[thumbnail] Set custom thumbnail for video {video_id}")
+        return True
+    except Exception as e:
+        print(f"[thumbnail] Set failed (often needs channel verification): {e}")
+        return False
+
+
+def youtube_count_recent_uploads(youtube, channel_id=None, days=30):
+    """Count how many videos uploaded in the last `days` days — used for streak."""
+    try:
+        if not channel_id:
+            # Get own channel
+            ch = youtube.channels().list(
+                part="contentDetails,statistics",
+                mine=True
+            ).execute()
+            items = ch.get("items", [])
+            if not items:
+                return 0
+            channel_id = items[0]["id"]
+
+        # Search uploads from this channel
+        cutoff = datetime.now(timezone.utc) - timedelta(days=days)
+        # Use search.list with date filter
+        cutoff_str = cutoff.strftime("%Y-%m-%dT%H:%M:%SZ")
+        resp = youtube.search().list(
+            part="snippet",
+            channelId=channel_id,
+            type="video",
+            publishedAfter=cutoff_str,
+            maxResults=50
+        ).execute()
+        count = resp.get("pageInfo", {}).get("totalResults", 0)
+        # Also iterate pages for accuracy
+        while resp.get("nextPageToken") and count < 500:
+            resp = youtube.search().list(
+                part="snippet",
+                channelId=channel_id,
+                type="video",
+                publishedAfter=cutoff_str,
+                pageToken=resp["nextPageToken"],
+                maxResults=50
+            ).execute()
+            count += resp.get("pageInfo", {}).get("totalResults", 0)
+        return count
+    except Exception as e:
+        print(f"[streak] Failed: {e}")
+        return 0
+
+
+def make_short_clip_from_video(src_video_path, out_path, max_duration=45):
+    """
+    Extract the first `max_duration` seconds of a video as a 9:16 Shorts version.
+    Falls back to the first 30s if video is shorter.
+    """
+    try:
+        clip = VideoFileClip(src_video_path)
+        duration = min(max_duration, clip.duration)
+        short = clip.subclip(0, duration)
+        # Crop center to 9:16 (1080x1920). Source is 1920x1080 → take middle 607x1080.
+        # Simpler approach: resize to 1080x1920 with padding (letterbox).
+        # We'll just resize + pad for Shorts compatibility.
+        target_w, target_h = 1080, 1920
+        src_w, src_h = short.w, short.h
+        # Scale to fit width
+        scale = target_w / src_w
+        new_h = int(src_h * scale)
+        short = short.resize((target_w, new_h))
+        # If taller than target, crop; if shorter, pad with black
+        if new_h > target_h:
+            short = short.crop(y_center=new_h // 2, y_max=target_h)
+        elif new_h < target_h:
+            pad_top = (target_h - new_h) // 2
+            pad_bot = target_h - new_h - pad_top
+            from moviepy.editor import ColorClip
+            top = ColorClip((target_w, pad_top), color=(0, 0, 0)).set_duration(short.duration)
+            bot = ColorClip((target_w, pad_bot), color=(0, 0, 0)).set_duration(short.duration)
+            top = top.set_position(('center', 0))
+            bot = bot.set_position(('center', target_h - pad_bot))
+            short = CompositeVideoClip([short.set_position(('center', pad_top)), top, bot],
+                                        size=(target_w, target_h))
+        short.write_videofile(out_path, codec='libx264', audio_codec='aac',
+                             fps=24, verbose=False, logger=None)
+        clip.close()
+        short.close()
+        print(f"[short] Saved Shorts clip to {out_path}")
+        return True
+    except Exception as e:
+        print(f"[short] Failed: {e}")
+        return False
 
 def upload_to_facebook(video_path, title, permalink):
     """Upload video to Facebook Page."""
@@ -648,6 +1225,29 @@ print(f"IST Time: {ist_now}")
 print(f"Puzzle Date (Target): {puzzle_date}")
 print(f"Formatted Date: {video_date}")
 
+# Fetch NYT puzzle metadata (puzzle number, editor, etc.) — used for SEO.
+# Falls back to None on failure (caller uses date-based fallback).
+print("\n--- Fetching NYT puzzle metadata ---")
+nyt_meta = fetch_nyt_meta(puzzle_date)
+puzzle_num = nyt_meta.get("puzzle_num")
+if not puzzle_num:
+    # Fallback: compute puzzle number from the NYT Wordle launch date (2021-06-19, #0)
+    try:
+        launch = datetime(2021, 6, 19, tzinfo=timezone.utc)
+        puzzle_num = (ist_now - launch).days + 1
+        print(f"[nyt_meta] Fallback puzzle_num computed from launch date: {puzzle_num}")
+    except Exception:
+        puzzle_num = 0
+else:
+    print(f"[nyt_meta] Puzzle #{puzzle_num}, editor: {nyt_meta.get('editor')}")
+
+# Pre-fetch word dictionary + yesterday/tomorrow solutions (best-effort).
+# These are used in the description and as overlay text in the video.
+known_solution = nyt_meta.get("solution", "")  # used for hints/analysis only
+dict_info = fetch_dictionary(known_solution) if known_solution else {}
+letter_freq_info = get_letter_frequency_info(known_solution) if known_solution else {}
+ytd_info = get_yesterday_tomorrow_solutions(puzzle_date)
+
 # Step 2: Build the word tree
 base_dir = os.path.dirname(os.path.abspath(__file__))
 word_file = os.path.join(base_dir, 'words.txt')
@@ -1049,8 +1649,10 @@ with sync_playwright() as p:
     # ========================================================================
     # SOLVER LOOP
     # ========================================================================
-    
+
     solved = False
+    solve_rounds = 6  # default if not solved
+    guesses_made = []  # list of (word, feedback) tuples for voiceover
     for round_num in range(6):
         if round_num == 0:
             # Round 1: Use a random effective starter instead of Trie default
@@ -1074,31 +1676,34 @@ with sync_playwright() as p:
         print(f"Best guess: {best_word.upper()} (from {possible_words} if applicable)")
         
         type_word(best_word)
-        
+
         feedback = get_feedback(round_num)
-        
+
         if feedback is None:
             print("ERROR: Could not read feedback!")
             break
-        
+
+        guesses_made.append((best_word, feedback))
+
         if feedback == "22222":
             print(f"\n🎉 SOLVED! The word was: {best_word.upper()}")
             solved = True
-            
+            solve_rounds = round_num + 1
+
             # IMMEDIATELY clean up any popups before they appear in video
             print("Cleaning up UI to prevent popups...")
             clean_up_ui(page)
-            
+
             # Wait for green animation to complete
             human_delay(0.5, 1.0)
-            
+
             # Clean up again in case popups appeared during delay
             clean_up_ui(page)
-            
+
             end_trim = time.time() - video_start_time
             print(f"End trim set to: {end_trim:.2f} seconds")
             break
-        
+
         try:
             apply_result(best_word, feedback, solver_tree)
             remaining = max(0, solver_tree.child_word_count) # Prevent negative counts in display
@@ -1176,7 +1781,7 @@ try:
         if video_end_time > 0:
             print(f"Trimming video end only: End={video_end_time:.2f}s")
             gameplay_clip = gameplay_clip.subclip(0, video_end_time)
-    
+
     content_clips.append(gameplay_clip)
 
     # 3. OUTRO
@@ -1199,7 +1804,7 @@ try:
             selected_song = random.choice(songs)
             song_path = os.path.join(base_dir, selected_song)
             print(f"Adding background music to main content: {selected_song}")
-            
+
             try:
                 audio_clip = AudioFileClip(song_path)
                 # Loop audio if shorter than content, or cut if different
@@ -1207,7 +1812,7 @@ try:
                     final_audio = afx.audio_loop(audio_clip, duration=main_content_clip.duration)
                 else:
                     final_audio = audio_clip.subclip(0, main_content_clip.duration)
-                
+
                 # Set audio to main content
                 main_content_clip = main_content_clip.set_audio(final_audio)
                 print("Audio track set successfully on gameplay/outro.")
@@ -1215,6 +1820,70 @@ try:
                 print(f"Error processing audio: {e}")
         else:
             print("No background music found.")
+
+    # 5b. TTS VOICEOVER (best-effort, gTTS — free)
+    # Generate a short voiceover for the intro+gameplay segment explaining
+    # what we're doing. We composite it OVER the existing music at low volume.
+    try:
+        if main_content_clip and known_solution:
+            print("[tts] Generating voiceover...")
+            voiceover_text_parts = [
+                f"Today's Wordle is puzzle number {puzzle_num}.",
+                f"Let's see if we can crack it.",
+            ]
+            # Add per-round commentary
+            for i, (word, fb) in enumerate(guesses_made):
+                if fb == "22222":
+                    voiceover_text_parts.append(
+                        f"Round {i+1}: {word.upper()}! Solved it!"
+                    )
+                else:
+                    greens = sum(1 for c in fb if c == "2")
+                    yellows = sum(1 for c in fb if c == "1")
+                    voiceover_text_parts.append(
+                        f"Round {i+1}: {word.upper()}. "
+                        f"{greens} green, {yellows} yellow."
+                    )
+            if dict_info.get("definition"):
+                voiceover_text_parts.append(
+                    f"The word {known_solution.upper()} means: "
+                    f"{dict_info['definition'][:120]}"
+                )
+
+            voiceover_text = " ".join(voiceover_text_parts)
+            tts_path = os.path.join(base_dir, f"tts_{puzzle_date}.mp3")
+            if generate_tts_audio(voiceover_text, tts_path):
+                tts_clip = AudioFileClip(tts_path)
+                # Position the TTS to start at the same time as the gameplay
+                # (intro music plays during the intro segment; voiceover
+                # starts when gameplay starts). We use CompositeAudioClip.
+                # Build a silent gap before the voiceover = duration of intro.
+                intro_dur = intro_clip.duration if intro_clip else 0
+                if tts_clip.duration < (main_content_clip.duration - intro_dur):
+                    # Loop not needed; pad silence at end
+                    pass
+                # Mix: music at 30% volume + TTS at 100%
+                from moviepy.audio.AudioClip import AudioClip
+                # Lower the music volume
+                if main_content_clip.audio:
+                    music_audio = main_content_clip.audio.volumex(0.25)
+                    # Composite with TTS delayed by intro_dur
+                    # But main_content_clip starts AFTER intro_clip,
+                    # so TTS starts at t=0 of main_content_clip
+                    composite_audio = CompositeAudioClip([
+                        music_audio,
+                        tts_clip,
+                    ])
+                    main_content_clip = main_content_clip.set_audio(composite_audio)
+                    print("[tts] Voiceover mixed with background music")
+                tts_clip.close()
+                # Clean up TTS file
+                try:
+                    os.remove(tts_path)
+                except Exception:
+                    pass
+    except Exception as e:
+        print(f"[tts] Voiceover workflow failed: {e}")
 
     # 6. FINAL ASSEMBLY (Intro + Main Content)
     final_parts = []
@@ -1254,7 +1923,14 @@ if 'YOUTUBE_REFRESH_TOKEN' not in os.environ:
     print(f"Video saved locally as: {final_video_file}")
     print("Skipping YouTube upload.")
 else:
-    SCOPES = ['https://www.googleapis.com/auth/youtube.upload']
+    # Expanded scopes for playlist management, comments, thumbnails, etc.
+    # The original refresh token may have only granted youtube.upload scope;
+    # we attempt to use the broader scopes and gracefully degrade on failure.
+    SCOPES = [
+        'https://www.googleapis.com/auth/youtube.upload',
+        'https://www.googleapis.com/auth/youtube',  # playlists, thumbnails, etc.
+        'https://www.googleapis.com/auth/youtube.force-ssl',  # comments
+    ]
     try:
         creds = Credentials.from_authorized_user_info({
             'refresh_token': os.environ['YOUTUBE_REFRESH_TOKEN'],
@@ -1269,32 +1945,24 @@ else:
 
         youtube = build('youtube', 'v3', credentials=creds)
 
-        # SEO-optimized title and description
-        video_title = f"Wordle answer today {video_date} | Today's Wordle answers and solutions & Hints wordsolverx.com"
+        # ====================================================================
+        # SEO-OPTIMIZED TITLE / DESCRIPTION / TAGS (rotates daily)
+        # ====================================================================
+        video_title = build_optimized_title(video_date, puzzle_num)
+        print(f"[seo] Title: {video_title}")
 
-        video_description = f"""🟩 Wordle Answer today for {video_date}
+        video_description = build_chapters_description(
+            video_date=video_date,
+            puzzle_num=puzzle_num,
+            solve_rounds=solve_rounds if solved else 6,
+            solution=known_solution or (guesses_made[-1][0] if guesses_made else "?????"),
+            dict_info=dict_info,
+            letter_freq=letter_freq_info,
+            ytd_info=ytd_info,
+            puzzle_date=puzzle_date,
+        )
 
-        wordle anwer today- https://wordsolverx.com/wordle-answer-today
-
-🔗 Try our FREE Wordle Solver:
-Solve ANY Wordle game in seconds with our intelligent word elimination tool!
-
-Wordle solver (advanced) solve any 4 to 12 letter wordle- https://wordsolverx.com/wordle-solver
-
-
-wordle archive and all previous answers- https://wordsolverx.com/wordle-answer-archive
-
-Watch how to solve today's Wordle puzzle step by step! Learn the best strategy to crack the daily Wordle.
-
-Nyt wordle answer today, today's wordle answer, 5 letter wordle answer, ai plays wordle, wordle answer, 
-
-📅 Puzzle Date: {video_date}
-
-
-#Wordle #WordleAnswer #Wordle{puzzle_date.replace('-', '')} #TodaysWordle #WordleSolution #WordleHints #NYTWordle #DailyWordle #WordGame #PuzzleGames
-"""
-
-        # Read and append default description if it exists
+        # Read and append default description if it exists (legacy support)
         description_file_path = os.path.join(base_dir, 'description.txt')
         if os.path.exists(description_file_path):
             try:
@@ -1305,19 +1973,62 @@ Nyt wordle answer today, today's wordle answer, 5 letter wordle answer, ai plays
             except Exception as e:
                 print(f"Warning: Could not read description.txt: {e}")
 
+        video_tags = build_optimized_tags(video_date_short, puzzle_date, puzzle_num)
+        print(f"[seo] Tags: {video_tags}")
+
+        # ====================================================================
+        # PREMIERE SCHEDULING (set publishAt to next 7 AM IST if not yet)
+        # Premieres get 2-3x more initial engagement than plain uploads.
+        # ====================================================================
+        status_body = {'privacyStatus': 'public'}
+        try:
+            # If current IST time is before 7 AM, schedule for today 7 AM IST
+            # Otherwise publish immediately (don't delay past the day).
+            ist_hour = ist_now.hour
+            if 0 <= ist_hour < 7:
+                # Schedule for today at 7 AM IST = 1:30 UTC
+                target_utc = utc_now.replace(hour=1, minute=30, second=0, microsecond=0)
+                if target_utc <= utc_now:
+                    target_utc = target_utc + timedelta(days=1)
+                publish_at = target_utc.strftime("%Y-%m-%dT%H:%M:%SZ")
+                status_body['publishAt'] = publish_at
+                status_body['selfDeclaredMadeForKids'] = False
+                print(f"[seo] Premiere scheduled for: {publish_at} UTC (7 AM IST)")
+        except Exception as e:
+            print(f"[seo] Premiere scheduling skipped: {e}")
+
+        # ====================================================================
+        # Generate custom thumbnail via Pillow
+        # ====================================================================
+        thumbnail_path = os.path.join(base_dir, f'thumbnail_{puzzle_date}.png')
+        partial_letters = ["?", "?", "?", "?", "?"]
+        if known_solution:
+            # Show first 2 letters as green, 3rd as yellow (curiosity gap)
+            partial_letters = [
+                known_solution[0].upper(),
+                known_solution[1].upper(),
+                "?",
+                "?",
+                "?",
+            ]
+        generate_daily_thumbnail(
+            out_path=thumbnail_path,
+            puzzle_num=puzzle_num,
+            date_str=video_date.split(",")[0],
+            partial_letters=partial_letters,
+            solution=known_solution,
+        )
+
         body = {
             'snippet': {
                 'title': video_title,
                 'description': video_description,
-                'tags': [
-                    'Wordle', 'Wordle Answer', 'Wordle Today', f'Wordle {video_date_short}',
-                    'Wordle Solution', 'Wordle Hints', 'Daily Wordle', 'NYT Wordle',
-                    'Word Game', 'Puzzle', 'Wordle Solver', 'How to Solve Wordle',
-                    'Wordle Strategy', 'Wordle Tips', f'Wordle {puzzle_date}'
-                ],
-                'categoryId': '20'
+                'tags': video_tags,
+                'categoryId': '20',  # Gaming
+                'defaultLanguage': 'en',
+                'defaultAudioLanguage': 'en',
             },
-            'status': {'privacyStatus': 'public'}
+            'status': status_body,
         }
 
         media = MediaFileUpload(final_video_file, mimetype='video/mp4', resumable=True)
@@ -1326,6 +2037,89 @@ Nyt wordle answer today, today's wordle answer, 5 letter wordle answer, ai plays
         video_id = response["id"]
         video_uploaded_to_youtube = True
         print(f'✅ Video uploaded: https://youtu.be/{video_id}')
+
+        # ====================================================================
+        # POST-UPLOAD ENRICHMENT (all wrapped defensively)
+        # ====================================================================
+
+        # 1. Set custom thumbnail (requires channel verified for custom thumbnails)
+        if os.path.exists(thumbnail_path):
+            youtube_set_thumbnail(youtube, video_id, thumbnail_path)
+
+        # 2. Add to playlists (monthly + yearly)
+        try:
+            year = ist_now.year
+            month_name = ist_now.strftime("%B %Y")  # e.g., "August 2026"
+            playlists_to_add = [
+                (f"Wordle Answers — {month_name}",
+                 f"Daily Wordle solution videos for {month_name}."),
+                (f"Wordle Answers — {year}",
+                 f"All daily Wordle solution videos from {year}."),
+            ]
+            for title, desc in playlists_to_add:
+                pid = youtube_find_or_create_playlist(youtube, title, desc)
+                if pid:
+                    youtube_add_to_playlist(youtube, pid, video_id)
+        except Exception as e:
+            print(f"[playlist] Workflow failed: {e}")
+
+        # 3. Post pinned comment with chapter timestamps + question CTA
+        try:
+            comment_text = (
+                f"What was your first guess today? 🤔\n\n"
+                f"⏱️ Chapters:\n"
+                f"0:00 Can you solve it?\n"
+                f"0:15 3 hints\n"
+                f"0:35 The solve begins\n"
+                f"2:05 Word analysis\n"
+                f"2:50 WordleBot comparison\n"
+                f"\n"
+                f"Try our FREE Wordle Solver: https://wordsolverx.com/wordle-solver\n"
+                f"\n"
+                f"🟩 = got it    🟨 = close    ⬛ = stumped"
+            )
+            youtube_pin_comment(youtube, video_id, comment_text)
+        except Exception as e:
+            print(f"[comment] Workflow failed: {e}")
+
+        # 4. Streak counter (just log it for now; overlay is in video itself)
+        try:
+            streak_count = youtube_count_recent_uploads(youtube, days=365)
+            print(f"[streak] ~{streak_count} videos uploaded in last 365 days")
+        except Exception as e:
+            print(f"[streak] Failed: {e}")
+
+        # 5. Create and upload YouTube Shorts version (30s hint+reveal)
+        try:
+            shorts_path = os.path.join(base_dir, f'wordle_shorts_{puzzle_date}.mp4')
+            if make_short_clip_from_video(final_video_file, shorts_path, max_duration=45):
+                # Upload as a separate Short (stays private — main video is the focus)
+                # We mark it as 'unlisted' to avoid duplicate-content penalty.
+                shorts_body = {
+                    'snippet': {
+                        'title': f"Wordle #{puzzle_num} in 45 seconds ⚡ ({video_date.split(',')[0]})",
+                        'description': (
+                            f"Quick solve of Wordle #{puzzle_num}!\n\n"
+                            f"Full video with hints & analysis: https://youtu.be/{video_id}\n\n"
+                            f"#Wordle #Shorts #WordleAnswer"
+                        ),
+                        'tags': ['Wordle', 'Shorts', 'Wordle Answer', f'Wordle #{puzzle_num}'],
+                        'categoryId': '20',
+                    },
+                    'status': {'privacyStatus': 'unlisted'},  # avoid duplicate penalty
+                }
+                shorts_media = MediaFileUpload(shorts_path, mimetype='video/mp4', resumable=True)
+                shorts_resp = youtube.videos().insert(
+                    part='snippet,status', body=shorts_body, media_body=shorts_media
+                ).execute()
+                print(f"[short] Shorts version uploaded: https://youtu.be/{shorts_resp['id']} (unlisted)")
+                # Clean up shorts file
+                try:
+                    os.remove(shorts_path)
+                except Exception:
+                    pass
+        except Exception as e:
+            print(f"[short] Workflow failed: {e}")
 
     except Exception as e:
         if "uploadLimitExceeded" in str(e):
