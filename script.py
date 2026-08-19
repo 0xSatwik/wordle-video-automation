@@ -515,6 +515,117 @@ def human_type(page, text, delay_min=0.08, delay_max=0.25):
         time.sleep(random.uniform(delay_min, delay_max))
 
 
+def dismiss_ad_interstitial(page, max_wait=15, max_retries=3):
+    """
+    Dismiss the NYT 'Advertisement' interstitial that appears after
+    clicking the Play button. Introduced by NYT in mid-2026.
+
+    The modal has:
+      - role="dialog"
+      - aria-label="Advertisement"
+      - class starting with 'AdInterstitial-module_modalOverlay__'
+      - a button with text 'Continue to Wordle'
+
+    The original script's close-button selectors (button[aria-label="Close"]
+    and [data-testid="close-icon"]) do NOT match this new modal, so the
+    gameplay video was being recorded with the ad overlay on top and no
+    letters were ever typed into the actual game.
+    """
+    print("Looking for NYT ad interstitial to dismiss...")
+    for attempt in range(1, max_retries + 1):
+        try:
+            ad_dialog = page.locator(
+                'div[role="dialog"][aria-label="Advertisement"]'
+            )
+            try:
+                ad_dialog.wait_for(state="visible", timeout=max_wait * 1000)
+            except Exception:
+                print("  No ad interstitial found within timeout (OK).")
+                return True
+
+            print(
+                f"  Attempt {attempt}: Ad interstitial detected. "
+                "Clicking 'Continue to Wordle'..."
+            )
+
+            # Try several selectors in order of preference.
+            clicked = False
+            candidates = [
+                ("role button text",
+                 page.get_by_role("button", name="Continue to Wordle")),
+                ("dialog button has-text",
+                 page.locator(
+                     'div[role="dialog"][aria-label="Advertisement"] '
+                     'button:has-text("Continue to Wordle")'
+                 )),
+                ("text exact",
+                 page.get_by_text("Continue to Wordle", exact=True).first),
+            ]
+            for desc, locator in candidates:
+                try:
+                    if locator.is_visible(timeout=1000):
+                        locator.click()
+                        print(f"  Clicked via: {desc}")
+                        clicked = True
+                        break
+                except Exception:
+                    continue
+
+            if not clicked:
+                # Last-resort: JS click on any element with matching text.
+                page.evaluate("""
+                    () => {
+                        const all = Array.from(
+                            document.querySelectorAll('button, a, [role="button"], div, span')
+                        );
+                        const el = all.find(e => {
+                            const t = (e.innerText || '').trim().toLowerCase();
+                            return t === 'continue to wordle' ||
+                                   t.endsWith('continue to wordle');
+                        });
+                        if (el) { el.click(); return true; }
+                        return false;
+                    }
+                """)
+                print("  Clicked via JS fallback")
+                clicked = True
+
+            # Wait for the dialog to disappear.
+            try:
+                ad_dialog.wait_for(state="hidden", timeout=5000)
+                print("  Ad interstitial dismissed successfully.")
+                time.sleep(1.2)  # small buffer for fade-out / transition
+                return True
+            except Exception:
+                print("  Ad still visible after click, retrying...")
+                time.sleep(1.0)
+        except Exception as e:
+            print(f"  dismiss_ad_interstitial attempt {attempt} error: {e}")
+            time.sleep(1.0)
+
+    print("  WARNING: Could not fully dismiss ad interstitial after retries.")
+    return False
+
+
+def wait_for_wordle_board(page, max_wait=15):
+    """
+    Wait until the Wordle board (rows + keyboard) is visible.
+    Returns True if the board is ready, False otherwise.
+    """
+    print("Waiting for Wordle board to be ready...")
+    try:
+        page.wait_for_selector(
+            'div[aria-label^="Row"]', timeout=max_wait * 1000
+        )
+        rows = page.locator('div[aria-label^="Row"]').count()
+        keys = page.locator('button[data-key]').count()
+        print(f"  Wordle board ready: {rows} rows, {keys} keyboard keys")
+        return rows > 0 and keys > 0
+    except Exception as e:
+        print(f"  Wordle board not found within {max_wait}s: {e}")
+        return False
+
+
 # ============================================================================
 # MAIN SCRIPT
 # ============================================================================
@@ -593,24 +704,20 @@ with sync_playwright() as p:
         Object.defineProperty(navigator, 'plugins', { get: () => [1, 2, 3, 4, 5] });
         Object.defineProperty(navigator, 'languages', { get: () => ['en-US', 'en'] });
         window.chrome = { runtime: {} };
-        
-        // Inject CSS to prevent popups from displaying
+
+        // Inject CSS to prevent popups from displaying.
+        // NOTE: We deliberately do NOT hide div[role="dialog"][aria-label="Advertisement"]
+        // here because that ad interstitial must be DISMISSED by clicking the
+        // "Continue to Wordle" button (handled in dismiss_ad_interstitial()).
+        // Hiding it via CSS would leave it as an invisible overlay that
+        // still intercepts keyboard focus and breaks gameplay.
         const style = document.createElement('style');
         style.textContent = `
-            /* Hide account creation and bot detection modals */
-            div[role="dialog"]:has(*:is(h1, h2, h3, p):is(:contains("Create a free account"), :contains("tracking your stats"))) {
-                display: none !important;
-                visibility: hidden !important;
-            }
-            div:has(*:is(h1, h2, h3, p):is(:contains("You have been blocked"), :contains("suspect that you"), :contains("robot"))) {
-                display: none !important;
-                visibility: hidden !important;
-            }
             .Modal-module_modalOverlay__eaFhH { display: none !important; }
             div[data-testid="bottom-banner"] { display: none !important; }
             div[data-testid="toast-message"] { display: none !important; }
         `;
-        
+
         // Wait for DOM to be ready
         if (document.head) {
             document.head.appendChild(style);
@@ -619,8 +726,10 @@ with sync_playwright() as p:
                 document.head.appendChild(style);
             });
         }
-        
-        // Monitor for popup elements and remove them immediately
+
+        // Monitor for popup elements and remove them immediately.
+        // NOTE: Do NOT auto-remove the "Advertisement" interstitial here
+        // either — it needs to be dismissed by clicking the button.
         const observer = new MutationObserver((mutations) => {
             mutations.forEach((mutation) => {
                 mutation.addedNodes.forEach((node) => {
@@ -637,7 +746,7 @@ with sync_playwright() as p:
                 });
             });
         });
-        
+
         // Start observing when DOM is ready
         if (document.body) {
             observer.observe(document.body, { childList: true, subtree: true });
@@ -657,11 +766,6 @@ with sync_playwright() as p:
     print("Waiting for page to load...")
     human_delay(2, 3)
     
-    # Mark the effective start of the video (ensure we capture the Play click)
-    # Subtracting a small buffer to ensure we don't clip the start of the action
-    start_trim = max(0, (time.time() - video_start_time) - 0.5)
-    print(f"Start trim set to: {start_trim:.2f} seconds")
-    
     # Click Play button
     try:
         human_delay(1, 2)
@@ -670,24 +774,50 @@ with sync_playwright() as p:
             play_button.click()
             print("Clicked Play button")
             human_delay(2, 4)
+        else:
+            print("Play button not visible (may have been auto-played).")
     except Exception as e:
         print(f"Play button not found: {e}")
-    
-    # (Removed previous late start_trim logic)
-    
-    # Close modal if present
+
+    # ----------------------------------------------------------------------
+    # NEW (mid-2026 fix): NYT now shows an "Advertisement" interstitial
+    # (with a "Continue to Wordle" button) right after clicking Play.
+    # The old close-button selectors do NOT match this modal, so we must
+    # explicitly dismiss it before any gameplay can happen.
+    # Without this fix, the bot types into the void (the ad overlay
+    # intercepts focus) and the recorded video is just the ad + intro/outro.
+    # ----------------------------------------------------------------------
+    print("\n--- Dismiss NYT ad interstitial (post-Play) ---")
+    dismiss_ad_interstitial(page, max_wait=15, max_retries=3)
+
+    # NEW: Wait for the actual Wordle game board to be visible before
+    # starting to type. This prevents typing into the void if the ad
+    # wasn't dismissed, and ensures start_trim captures only real gameplay.
+    print("\n--- Wait for Wordle board ---")
+    board_ready = wait_for_wordle_board(page, max_wait=15)
+    if not board_ready:
+        print("WARNING: Wordle board not detected. Will attempt gameplay anyway.")
+
+    # Mark the effective start of the video AFTER the ad is dismissed and
+    # the board is visible. Previously this was set BEFORE clicking Play,
+    # which meant the ad interstitial was included in the final video.
+    start_trim = max(0, (time.time() - video_start_time) - 0.5)
+    print(f"Start trim set to: {start_trim:.2f} seconds (after ad dismissal)")
+
+    # Close any other modal if present (legacy "How to Play" / "Stats"
+    # modals with a Close button — these may or may not appear).
     try:
-        human_delay(1, 2)
+        human_delay(0.5, 1.5)
         close_button = page.locator('button[aria-label="Close"]')
         if close_button.is_visible():
             close_button.click()
-            human_delay(1, 2)
+            human_delay(0.5, 1.5)
     except:
         try:
             close_button = page.locator('[data-testid="close-icon"]')
             if close_button.is_visible():
                 close_button.click()
-                human_delay(1, 2)
+                human_delay(0.5, 1.5)
         except:
             pass
     
@@ -792,6 +922,14 @@ with sync_playwright() as p:
                         const style = document.createElement('style');
                         style.id = 'popup-blocker-aggressive';
                         style.textContent = `
+                            /* NYT mid-2026 ad interstitial (after Play click) */
+                            div[role="dialog"][aria-label="Advertisement"],
+                            div[class*="AdInterstitial-module_modalOverlay__"],
+                            div[class*="AdInterstitial-module_shortenFadeIn__"] {
+                                display: none !important;
+                                visibility: hidden !important;
+                            }
+                            /* Legacy modal classes */
                             div[role="dialog"] { display: none !important; visibility: hidden !important; }
                             .Modal-module_modalOverlay__eaFhH { display: none !important; }
                             div[data-testid="bottom-banner"] { display: none !important; }
@@ -799,7 +937,7 @@ with sync_playwright() as p:
                             /* Hide any fixed/absolute positioned high z-index elements that might be popups */
                             body > div[style*="position: fixed"][style*="z-index"] { display: none !important; }
                         `;
-                        
+
                         // Remove existing style if present and add new one
                         const existing = document.getElementById('popup-blocker-aggressive');
                         if (existing) existing.remove();
