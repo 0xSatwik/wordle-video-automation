@@ -1566,10 +1566,14 @@ print("\n--- Fetching NYT puzzle metadata ---")
 nyt_meta = fetch_nyt_meta(puzzle_date)
 puzzle_num = nyt_meta.get("puzzle_num")
 if not puzzle_num:
-    # Fallback: compute puzzle number from the NYT Wordle launch date (2021-06-19, #0)
+    # Fallback: compute puzzle number from the Wordle launch date.
+    # 2021-06-19 was puzzle #0 (verified: 2026-08-24 -> #1892), so NO +1.
+    # Use puzzle_date (not ist_now) so the number always matches the
+    # puzzle's calendar day even when running just after midnight IST.
     try:
         launch = datetime(2021, 6, 19, tzinfo=timezone.utc)
-        puzzle_num = (ist_now - launch).days + 1
+        target = datetime.strptime(puzzle_date, "%Y-%m-%d").replace(tzinfo=timezone.utc)
+        puzzle_num = (target - launch).days
         print(f"[nyt_meta] Fallback puzzle_num computed from launch date: {puzzle_num}")
     except Exception:
         puzzle_num = 0
