@@ -91,7 +91,18 @@ def fetch_dictionary(word):
             "definition": "",
             "example": "",
             "synonyms": [],
+            "meanings": [],   # up to 3 (pos, definition, example) for the analysis slides
         }
+        for m in entry.get("meanings", [])[:3]:
+            defs = m.get("definitions", [])
+            if not defs:
+                continue
+            meaning = {
+                "pos": m.get("partOfSpeech", ""),
+                "definition": defs[0].get("definition", ""),
+                "example": defs[0].get("example", ""),
+            }
+            out["meanings"].append(meaning)
         meanings = entry.get("meanings", [])
         if meanings:
             m = meanings[0]
@@ -129,37 +140,6 @@ def compute_hints(solution):
         return []
 
 
-def get_letter_frequency_info(solution):
-    """Return how common the solution's letters are in English (rough)."""
-    try:
-        # Letter frequencies in English text (percentages, approximate).
-        freq = {
-            'e': 12.7, 't': 9.1, 'a': 8.2, 'o': 7.5, 'i': 7.0, 'n': 6.7,
-            's': 6.3, 'h': 6.1, 'r': 6.0, 'd': 4.3, 'l': 4.0, 'c': 2.8,
-            'u': 2.8, 'm': 2.4, 'w': 2.4, 'f': 2.2, 'g': 2.0, 'y': 2.0,
-            'p': 1.9, 'b': 1.5, 'v': 1.0, 'k': 0.8, 'j': 0.15,
-            'x': 0.15, 'q': 0.10, 'z': 0.07,
-        }
-        letters = sorted(set(solution.lower()))
-        avg = sum(freq.get(c, 0) for c in letters) / len(letters)
-        if avg > 7.0:
-            tier = "very common"
-        elif avg > 4.0:
-            tier = "common"
-        elif avg > 2.0:
-            tier = "moderately rare"
-        else:
-            tier = "rare"
-        return {
-            "letters": letters,
-            "avg_freq": round(avg, 1),
-            "tier": tier,
-        }
-    except Exception as e:
-        print(f"[letter_freq] Failed: {e}")
-        return {}
-
-
 def get_yesterday_tomorrow_solutions(puzzle_date):
     """Fetch yesterday's solution (for recap) and tomorrow's (for teaser)."""
     try:
@@ -175,18 +155,6 @@ def get_yesterday_tomorrow_solutions(puzzle_date):
     except Exception as e:
         print(f"[ytd] Failed: {e}")
         return {"yesterday": None, "tomorrow": None}
-
-
-def generate_tts_audio(text, out_path, slow=False):
-    """Generate a TTS mp3 using gTTS (free, no API key). Returns True on success."""
-    try:
-        from gtts import gTTS
-        tts = gTTS(text=text, lang='en', slow=slow)
-        tts.save(out_path)
-        return os.path.exists(out_path) and os.path.getsize(out_path) > 100
-    except Exception as e:
-        print(f"[tts] Failed: {e}")
-        return False
 
 
 def _load_thumbnail_fonts():
@@ -351,25 +319,42 @@ def generate_daily_thumbnail(out_path, puzzle_num, date_str, partial_letters=Non
 
 
 def _load_fonts():
-    """Load Pillow fonts at multiple sizes. Returns dict of font objects."""
-    font_paths = [
-        "C:/Windows/Fonts/arialbd.ttf",
-        "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
-        "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf",
+    """Load Pillow font PAIRS (bold + regular) at multiple sizes.
+
+    Prefers Segoe UI (Windows) / DejaVu (Linux CI) so slides get a clean,
+    modern look with proper typographic hierarchy instead of one heavy
+    bold font for everything.
+    """
+    pairs = [
+        # (bold, regular)
+        ("C:/Windows/Fonts/segoeuib.ttf", "C:/Windows/Fonts/segoeui.ttf"),
+        ("C:/Windows/Fonts/arialbd.ttf", "C:/Windows/Fonts/arial.ttf"),
+        ("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+         "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"),
+        ("/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf",
+         "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf"),
     ]
-    out = {}
-    for fp in font_paths:
-        if os.path.exists(fp):
-            try:
-                out['title'] = ImageFont.truetype(fp, 80)
-                out['body'] = ImageFont.truetype(fp, 44)
-                out['small'] = ImageFont.truetype(fp, 32)
-                out['tile'] = ImageFont.truetype(fp, 100)
-                return out
-            except Exception:
-                continue
-    default = ImageFont.load_default()
-    return {'title': default, 'body': default, 'small': default, 'tile': default}
+    bold_path = regular_path = None
+    for b, r in pairs:
+        if os.path.exists(b):
+            bold_path = b
+            regular_path = r if (r and os.path.exists(r)) else b
+            break
+    if not bold_path:
+        d = ImageFont.load_default()
+        return {k: d for k in
+                ('big', 'title', 'medium', 'bold', 'body', 'small', 'tile',
+                 'regular')}
+    return {
+        'big':     ImageFont.truetype(bold_path, 130),   # huge word display
+        'tile':    ImageFont.truetype(bold_path, 100),   # tile letters
+        'title':   ImageFont.truetype(bold_path, 76),    # slide headers
+        'medium':  ImageFont.truetype(bold_path, 52),    # section labels
+        'bold':    ImageFont.truetype(bold_path, 42),    # emphasized body
+        'body':    ImageFont.truetype(regular_path, 42), # body text
+        'small':   ImageFont.truetype(regular_path, 30), # captions/meta
+        'regular': ImageFont.truetype(regular_path, 38), # generic regular
+    }
 
 
 def generate_hints_segment_image(out_path, puzzle_num, date_str, hints, solution):
@@ -436,91 +421,322 @@ def generate_hints_segment_image(out_path, puzzle_num, date_str, hints, solution
         return False
 
 
-def generate_word_analysis_image(out_path, puzzle_num, solution, dict_info,
-                                  letter_freq):
-    """Generate a 1920x1080 image showing word definition + analysis."""
+# --- Shared helpers for the analysis slides -------------------------------
+
+SLIDE_W, SLIDE_H = 1920, 1080
+SLIDE_BG_TOP = (13, 20, 38)
+SLIDE_BG_BOT = (30, 45, 80)
+SLIDE_CARD = (23, 34, 58)
+SLIDE_CARD_BORDER = (52, 68, 100)
+SLIDE_TEXT = (255, 255, 255)
+SLIDE_MUTED = (168, 180, 200)
+SLIDE_GREEN = (46, 204, 113)
+SLIDE_YELLOW = (255, 205, 0)
+SLIDE_GRAY = (110, 118, 132)
+
+# Standard English Scrabble letter scores — used for the "word facts" slide.
+SCRABBLE_SCORES = {
+    'a': 1, 'b': 3, 'c': 3, 'd': 2, 'e': 1, 'f': 4, 'g': 2, 'h': 4,
+    'i': 1, 'j': 8, 'k': 5, 'l': 1, 'm': 3, 'n': 1, 'o': 1, 'p': 3,
+    'q': 10, 'r': 1, 's': 1, 't': 1, 'u': 1, 'v': 4, 'w': 4, 'x': 8,
+    'y': 4, 'z': 10,
+}
+
+# English letter frequency percentages (approximate) + rank, for the
+# letter-frequency slide.
+ENGLISH_FREQ = {
+    'e': (12.7, 1), 't': (9.1, 2), 'a': (8.2, 3), 'o': (7.5, 4),
+    'i': (7.0, 5), 'n': (6.7, 6), 's': (6.3, 7), 'h': (6.1, 8),
+    'r': (6.0, 9), 'd': (4.3, 10), 'l': (4.0, 11), 'c': (2.8, 12),
+    'u': (2.8, 13), 'm': (2.4, 14), 'w': (2.4, 15), 'f': (2.2, 16),
+    'g': (2.0, 17), 'y': (2.0, 18), 'p': (1.9, 19), 'b': (1.5, 20),
+    'v': (1.0, 21), 'k': (0.8, 22), 'j': (0.15, 23), 'x': (0.15, 24),
+    'q': (0.10, 25), 'z': (0.07, 26),
+}
+
+
+def get_letter_frequency_info(solution):
+    """Return how common the solution's letters are in English (rough)."""
     try:
-        W, H = 1920, 1080
-        bg = (15, 23, 42)
-        text_color = (255, 255, 255)
-        accent = (34, 197, 94)
-        yellow = (234, 179, 8)
-        img = Image.new("RGB", (W, H), bg)
-        draw = ImageDraw.Draw(img)
-        fonts = _load_fonts()
+        letters = sorted(set(solution.lower()))
+        avg = sum(ENGLISH_FREQ.get(c, (0, 0))[0] for c in letters) / len(letters)
+        if avg > 7.0:
+            tier = "very common"
+        elif avg > 4.0:
+            tier = "common"
+        elif avg > 2.0:
+            tier = "moderately rare"
+        else:
+            tier = "rare"
+        return {
+            "letters": letters,
+            "avg_freq": round(avg, 1),
+            "tier": tier,
+        }
+    except Exception as e:
+        print(f"[letter_freq] Failed: {e}")
+        return {}
 
-        # Header
-        draw.text((W // 2 - 500, 60), "WORD ANALYSIS", fill=accent, font=fonts['title'])
 
-        # Big solution word
-        draw.text((W // 2 - 200, 180), solution.upper(),
-                  fill=yellow, font=fonts['tile'])
+def _slide_base(kicker, meta_text):
+    """Create a 1920x1080 slide with brand gradient + header. Returns
+    (img, draw, fonts, content_top_y)."""
+    img = Image.new("RGB", (SLIDE_W, SLIDE_H), SLIDE_BG_TOP)
+    draw = ImageDraw.Draw(img)
+    for y in range(SLIDE_H):
+        t = y / SLIDE_H
+        r = int(SLIDE_BG_TOP[0] + (SLIDE_BG_BOT[0] - SLIDE_BG_TOP[0]) * t)
+        g = int(SLIDE_BG_TOP[1] + (SLIDE_BG_BOT[1] - SLIDE_BG_TOP[1]) * t)
+        b = int(SLIDE_BG_TOP[2] + (SLIDE_BG_BOT[2] - SLIDE_BG_TOP[2]) * t)
+        draw.line([(0, y), (SLIDE_W, y)], fill=(r, g, b))
 
-        # Definition box
-        box_y = 360
-        draw.rectangle([100, box_y, W - 100, box_y + 360],
-                      fill=(30, 41, 59))
+    fonts = _load_fonts()
+    # Header: green kicker + muted meta, right-aligned puzzle meta
+    draw.rectangle([0, 0, 14, SLIDE_H], fill=SLIDE_GREEN)  # brand edge bar
+    draw.text((70, 52), kicker.upper(), fill=SLIDE_GREEN, font=fonts['medium'])
+    if meta_text:
+        mw = draw.textlength(meta_text, font=fonts['small'])
+        draw.text((SLIDE_W - 70 - mw, 66), meta_text, fill=SLIDE_MUTED,
+                  font=fonts['small'])
+    draw.line([(70, 140), (SLIDE_W - 70, 140)], fill=SLIDE_CARD_BORDER, width=3)
+    return img, draw, fonts, 190
 
-        if dict_info:
-            pos = dict_info.get("part_of_speech", "")
-            defn = dict_info.get("definition", "(no definition available)")
-            example = dict_info.get("example", "")
-            synonyms = dict_info.get("synonyms", [])
 
-            y = box_y + 30
-            if pos:
-                draw.text((130, y), f"Part of speech: {pos}",
-                         fill=accent, font=fonts['body'])
-                y += 70
-            # Definition (word-wrapped)
-            draw.text((130, y), "Definition:", fill=text_color, font=fonts['body'])
-            y += 70
-            # Wrap definition
-            words = defn.split()
-            lines = []
-            cur = ""
-            for w in words:
-                test = (cur + " " + w).strip()
-                if len(test) > 60:
-                    if cur:
-                        lines.append(cur)
-                    cur = w
-                else:
-                    cur = test
+def _wrap_text(draw, text, font, max_width):
+    """Word-wrap text to a pixel width. Returns list of lines."""
+    lines, cur = [], ""
+    for word in text.split():
+        test = (cur + " " + word).strip()
+        if draw.textlength(test, font=font) <= max_width:
+            cur = test
+        else:
             if cur:
                 lines.append(cur)
-            for line in lines[:4]:
-                draw.text((160, y), line, fill=text_color, font=fonts['body'])
-                y += 55
-            if example:
-                y += 20
-                draw.text((130, y), f"Example: \"{example[:80]}\"",
-                         fill=accent, font=fonts['small'])
-                y += 50
-            if synonyms:
-                y += 10
-                draw.text((130, y), f"Synonyms: {', '.join(synonyms[:5])}",
-                         fill=yellow, font=fonts['small'])
-        else:
-            draw.text((130, box_y + 100), "(Dictionary entry not available)",
-                     fill=text_color, font=fonts['body'])
+            cur = word
+    if cur:
+        lines.append(cur)
+    return lines
 
-        # Letter frequency stats
-        if letter_freq:
-            stats_y = 760
-            draw.text((130, stats_y),
-                     f"Letter rarity: {letter_freq['tier']} "
-                     f"(avg English freq: {letter_freq['avg_freq']}%)",
-                     fill=accent, font=fonts['body'])
-            letters_upper = ", ".join(c.upper() for c in letter_freq['letters'])
-            draw.text((130, stats_y + 70),
-                     f"Unique letters: {letters_upper}",
-                     fill=text_color, font=fonts['body'])
+
+def generate_definition_slide(out_path, puzzle_num, date_str, solution, dict_info):
+    """Slide 1/3 — clean dictionary card: word, phonetics, POS, all meanings,
+    example, synonyms."""
+    try:
+        img, draw, fonts, y = _slide_base(
+            "Word Analysis — Definition", f"#{puzzle_num}  •  {date_str}")
+
+        word = solution.upper()
+        # Big word + green underline
+        draw.text((70, y), word, fill=SLIDE_TEXT, font=fonts['big'])
+        word_w = draw.textlength(word, font=fonts['big'])
+        draw.rectangle([70, y + 150, 70 + word_w, y + 162], fill=SLIDE_GREEN)
+        # Phonetic pronunciation next to the word
+        phon = (dict_info or {}).get("phonetic", "")
+        if phon:
+            draw.text((80 + word_w + 40, y + 70), phon, fill=SLIDE_YELLOW,
+                      font=fonts['medium'])
+        y += 220
+
+        # POS chips + definition cards for up to 3 meanings
+        meanings = (dict_info or {}).get("meanings") or []
+        if not meanings and (dict_info or {}).get("definition"):
+            meanings = [{"pos": dict_info.get("part_of_speech", ""),
+                         "definition": dict_info.get("definition", ""),
+                         "example": dict_info.get("example", "")}]
+
+        if meanings:
+            for m in meanings[:3]:
+                card_h = 150
+                draw.rounded_rectangle([70, y, SLIDE_W - 70, y + card_h],
+                                       radius=20, fill=SLIDE_CARD,
+                                       outline=SLIDE_CARD_BORDER, width=2)
+                # POS chip
+                pos = (m.get("pos") or "word").upper()
+                chip_w = draw.textlength(pos, font=fonts['bold']) + 64
+                draw.rounded_rectangle([100, y + 24, 100 + chip_w, y + 82],
+                                       radius=12, fill=SLIDE_GREEN)
+                draw.text((132, y + 32), pos, fill=(10, 20, 14),
+                          font=fonts['bold'])
+                # Definition (up to 2 lines)
+                lines = _wrap_text(draw, m.get("definition", ""),
+                                   fonts['regular'], SLIDE_W - 320)
+                ty = y + 88
+                for line in lines[:2]:
+                    draw.text((100, ty), line, fill=SLIDE_TEXT,
+                              font=fonts['regular'])
+                    ty += 48
+                y += card_h + 24
+
+            # Example + synonyms footer card
+            example = (dict_info or {}).get("example", "")
+            synonyms = (dict_info or {}).get("synonyms", []) or []
+            foot_h = 150
+            draw.rounded_rectangle([70, y, SLIDE_W - 70, y + foot_h],
+                                   radius=20, fill=(30, 42, 66),
+                                   outline=SLIDE_CARD_BORDER, width=2)
+            fy = y + 26
+            if example:
+                ex_lines = _wrap_text(draw, f'Example: "{example}"',
+                                      fonts['regular'], SLIDE_W - 220)
+                for line in ex_lines[:2]:
+                    draw.text((100, fy), line, fill=SLIDE_YELLOW,
+                              font=fonts['regular'])
+                    fy += 46
+            if synonyms:
+                draw.text((100, y + foot_h - 62),
+                          f"SYNONYMS:  {', '.join(s.upper() for s in synonyms[:6])}",
+                          fill=SLIDE_MUTED, font=fonts['bold'])
+        else:
+            draw.text((70, y + 60), "Dictionary entry not available for this word.",
+                      fill=SLIDE_MUTED, font=fonts['body'])
 
         img.save(out_path, "PNG", optimize=True)
         return True
     except Exception as e:
-        print(f"[analysis_image] Failed: {e}")
+        print(f"[definition_slide] Failed: {e}")
+        return False
+
+
+def generate_letter_frequency_slide(out_path, puzzle_num, date_str, solution,
+                                     letter_freq):
+    """Slide 2/3 — per-letter English-frequency bar chart + rarity stats."""
+    try:
+        img, draw, fonts, y = _slide_base(
+            "Letter Frequency Analysis", f"#{puzzle_num}  •  {date_str}")
+
+        draw.text((70, y), f"How common are {solution.upper()}'s letters?",
+                  fill=SLIDE_TEXT, font=fonts['title'])
+        y += 130
+
+        max_freq = ENGLISH_FREQ.get('e', (12.7, 1))[0]
+        bar_max_w = SLIDE_W - 700
+        letters = sorted(set(solution.lower()),
+                         key=lambda c: -ENGLISH_FREQ.get(c, (0, 27))[0])
+        row_gap = 96
+        for letter in letters[:9]:
+            freq, rank = ENGLISH_FREQ.get(letter, (0.05, 27))
+            # Letter tile
+            draw.rounded_rectangle([70, y, 70 + 72, y + 72], radius=14,
+                                   fill=SLIDE_GREEN if freq >= 4.0 else SLIDE_GRAY)
+            draw.text((106, y + 36), letter.upper(), fill=(10, 20, 14),
+                      font=fonts['bold'], anchor="mm")
+            # Bar
+            bar_w = max(24, int(bar_max_w * (freq / max_freq)))
+            draw.rounded_rectangle([170, y + 12, 170 + bar_max_w, y + 60],
+                                   radius=10, fill=(30, 42, 66))
+            draw.rounded_rectangle([170, y + 12, 170 + bar_w, y + 60],
+                                   radius=10, fill=SLIDE_GREEN)
+            # Labels
+            draw.text((190 + bar_max_w, y + 36),
+                      f"{freq:.1f}%", fill=SLIDE_TEXT, font=fonts['bold'])
+            draw.text((190 + bar_max_w + 150, y + 36),
+                      f"#{rank} in English", fill=SLIDE_MUTED,
+                      font=fonts['small'])
+            y += row_gap
+
+        # Stats chips row
+        vowels = [c for c in solution.lower() if c in "aeiou"]
+        unique = set(solution.lower())
+        repeats = len(solution) - len(unique)
+        tier = (letter_freq or {}).get("tier", "common")
+        n_v, n_c = len(vowels), 5 - len(vowels)
+        chips = [
+            f"{len(unique)} unique letters",
+            f"{n_v} vowel{'s' if n_v != 1 else ''} • {n_c} consonant{'s' if n_c != 1 else ''}",
+            ("has repeated letters" if repeats > 0 else "no repeated letters"),
+            f"rarity: {tier}",
+        ]
+        cx = 70
+        cy = SLIDE_H - 120
+        for chip in chips:
+            cw = draw.textlength(chip, font=fonts['bold']) + 56
+            draw.rounded_rectangle([cx, cy, cx + cw, cy + 64], radius=16,
+                                   fill=SLIDE_CARD, outline=SLIDE_YELLOW, width=2)
+            draw.text((cx + 28, cy + 12), chip, fill=SLIDE_YELLOW,
+                      font=fonts['bold'])
+            cx += cw + 24
+
+        img.save(out_path, "PNG", optimize=True)
+        return True
+    except Exception as e:
+        print(f"[freq_slide] Failed: {e}")
+        return False
+
+
+def generate_word_facts_slide(out_path, puzzle_num, date_str, solution,
+                              solve_rounds, guesses_made):
+    """Slide 3/3 — word facts grid + the colored solve path."""
+    try:
+        img, draw, fonts, y = _slide_base(
+            "Word Facts & Solve Path", f"#{puzzle_num}  •  {date_str}")
+
+        sol = solution.lower()
+        vowels = [c for c in sol if c in "aeiou"]
+        unique = set(sol)
+        repeats = sorted({c for c in sol if sol.count(c) > 1})
+        scrabble = sum(SCRABBLE_SCORES.get(c, 0) for c in sol)
+
+        facts = [
+            ("STARTS WITH", sol[0].upper()),
+            ("ENDS WITH", sol[-1].upper()),
+            ("VOWELS", f"{len(vowels)} ({', '.join(v.upper() for v in vowels) or 'none'})"),
+            ("UNIQUE LETTERS", f"{len(unique)} of 5"),
+            ("REPEATED", (", ".join(c.upper() for c in repeats) if repeats else "none")),
+            ("SCRABBLE SCORE", f"{scrabble} points"),
+            ("GUESSES USED", f"{solve_rounds} of 6"),
+            ("DIFFICULTY", "EASY" if solve_rounds <= 2 else ("MEDIUM" if solve_rounds <= 4 else "HARD")),
+        ]
+
+        # Left column: 2x4 facts grid
+        col_w = (SLIDE_W - 620 - 70 - 40) // 2
+        row_h = 126
+        for i, (label, value) in enumerate(facts):
+            col, row = i % 2, i // 2
+            fx = 70 + col * (col_w + 40)
+            fy = y + 10 + row * (row_h + 26)
+            draw.rounded_rectangle([fx, fy, fx + col_w, fy + row_h],
+                                   radius=18, fill=SLIDE_CARD,
+                                   outline=SLIDE_CARD_BORDER, width=2)
+            draw.text((fx + 28, fy + 18), label, fill=SLIDE_MUTED,
+                      font=fonts['small'])
+            draw.text((fx + 28, fy + 60), str(value), fill=SLIDE_TEXT,
+                      font=fonts['bold'])
+
+        # Right column: solve path card
+        px = SLIDE_W - 500
+        pw = 430
+        path_h = 120 + 78 * max(1, len(guesses_made)) + 90
+        draw.rounded_rectangle([px, y, px + pw, y + path_h], radius=20,
+                               fill=SLIDE_CARD, outline=SLIDE_CARD_BORDER,
+                               width=2)
+        draw.text((px + 30, y + 28), "THE SOLVE PATH", fill=SLIDE_GREEN,
+                  font=fonts['bold'])
+        py = y + 100
+        tile, gap = 44, 8
+        for gi, (gword, fb) in enumerate(guesses_made[:6]):
+            draw.text((px + 30, py + 6), str(gi + 1), fill=SLIDE_MUTED,
+                      font=fonts['bold'])
+            for ti, ch in enumerate(gword[:5]):
+                state = fb[ti] if ti < len(fb) else '0'
+                color = (SLIDE_GREEN if state == '2'
+                         else SLIDE_YELLOW if state == '1' else SLIDE_GRAY)
+                tx = px + 70 + ti * (tile + gap)
+                draw.rounded_rectangle([tx, py, tx + tile, py + tile],
+                                       radius=8, fill=color)
+                draw.text((tx + tile // 2, py + tile // 2), ch.upper(),
+                          fill=(10, 20, 14), font=fonts['small'], anchor="mm")
+            py += 78
+        badge = f"SOLVED IN {solve_rounds}/6"
+        bw = draw.textlength(badge, font=fonts['bold']) + 56
+        draw.rounded_rectangle([px + 30, py + 6, px + 30 + bw, py + 62],
+                               radius=14, fill=SLIDE_YELLOW)
+        draw.text((px + 58, py + 16), badge, fill=(10, 20, 14),
+                  font=fonts['bold'])
+
+        img.save(out_path, "PNG", optimize=True)
+        return True
+    except Exception as e:
+        print(f"[facts_slide] Failed: {e}")
         return False
 
 
@@ -696,9 +912,23 @@ def build_chapters_description(video_date, puzzle_num, solve_rounds,
     elif solve_rounds >= 3:
         difficulty = "MEDIUM"
 
+    # FAQ block — captures long-tail voice/search queries directly.
+    vowels = sum(1 for c in solution if c in "aeiou")
+    faq_lines = [
+        f"• What is today's Wordle answer? → {solution.upper()} (#{puzzle_num})",
+        f"• What letter does today's Wordle start with? → {solution[0].upper()}",
+        f"• How many vowels are in today's Wordle? → {vowels}",
+    ]
+    if ytd_info.get("yesterday"):
+        faq_lines.append(
+            f"• What was yesterday's Wordle answer? → "
+            f"{ytd_info['yesterday']['word'].upper()} "
+            f"(#{ytd_info['yesterday'].get('num', '?')})")
+    faq_text = "❓ QUICK ANSWERS:\n" + "\n".join(faq_lines) + "\n"
+
     description = f"""🟩 Wordle Answer Today — {video_date} | Puzzle #{puzzle_num} 🟩
 
-Looking for today's Wordle answer? Watch the full solve with hints, then scroll down for the definition, letter stats and yesterday's recap.
+Today's Wordle answer is {solution.upper()}. Watch the full solve with hints, then the definition, letter-frequency analysis and yesterday's recap.
 
 Did you get today's Wordle? Comment your result below! 👇
 🟩 = got it    🟨 = close    ⬛ = stumped
@@ -706,6 +936,7 @@ Did you get today's Wordle? Comment your result below! 👇
 ⏱️ CHAPTERS:
 {chapters_str}
 
+{faq_text}
 {definition_text}{letter_info_text}{yesterday_text}{tomorrow_text}
 🎯 PUZZLE STATS:
    • Date: {video_date}
@@ -714,13 +945,15 @@ Did you get today's Wordle? Comment your result below! 👇
    • Guesses used: {solve_rounds}/6
    • Solution: {solution.upper()}
 
+🔔 Subscribe for a new Wordle answer every morning — never lose your streak!
+
 🔗 Try our FREE Wordle Solver (solves ANY Wordle in seconds):
 👉 https://wordsolverx.com/wordle-solver
 
 📅 Wordle Answer Archive (all 1,800+ answers):
 👉 https://wordsolverx.com/wordle-answer-archive
 
-#Wordle #WordleAnswer #Wordle{puzzle_date.replace('-', '')} #Wordle{puzzle_num} #TodaysWordle #WordleSolution #WordleHints #NYTWordle #DailyWordle #WordGame #PuzzleGames #WordleStrategy #WordleTips
+#Wordle #WordleAnswerToday #WordleAnswer #Wordle{puzzle_num} #TodaysWordle #WordleSolution #WordleHints #NYTWordle #DailyWordle #WordGame #PuzzleGames
 
 """
     return description
@@ -729,15 +962,16 @@ Did you get today's Wordle? Comment your result below! 👇
 def build_optimized_title(video_date, puzzle_num):
     """Pick one of three SEO-optimized title variants (rotates daily).
 
-    Every variant contains the exact high-volume search phrase
-    'Wordle Answer Today' (matches wordsolverx.com/wordle-answer-today),
-    the puzzle number and the date. Kept under YouTube's 100-char limit.
+    2026 research-backed rules applied:
+      - exact head keyword 'Wordle Answer Today' in the FIRST 35-40 chars
+      - 50-60 chars total (mobile shows ~35-40; nothing important cut off)
+      - numbers (#1892) and date modifiers boost CTR
     """
     date_short = video_date.split(",")[0]  # "August 20" instead of full
     variants = [
-        f"Wordle Answer Today — Wordle #{puzzle_num} Solution & Hints ({date_short}) 🟩",
-        f"Wordle Answer Today ({date_short}) — Puzzle #{puzzle_num} Solved! Did You Get It? 🤔",
-        f"Today's Wordle #{puzzle_num} — Wordle Answer & Hints ({date_short}) 🟩🟩🟩🟩🟩",
+        f"Wordle Answer Today — #{puzzle_num} Hints & Solution ({date_short})",
+        f"Wordle Answer Today ({date_short}) — Puzzle #{puzzle_num} Solved! 🟩",
+        f"Wordle Answer Today — {date_short} Puzzle #{puzzle_num} 🟩🟩🟩🟩🟩",
     ]
     # Rotate daily based on puzzle_num
     return variants[puzzle_num % len(variants)]
@@ -858,6 +1092,80 @@ def youtube_set_thumbnail(youtube, video_id, thumbnail_path):
         return True
     except Exception as e:
         print(f"[thumbnail] Set failed (often needs channel verification): {e}")
+        return False
+
+
+def build_captions_srt(video_chapters, total_duration, video_date, puzzle_num,
+                       solution, dict_info, ytd_info):
+    """Build a keyword-rich SRT from the real chapter timings.
+
+    Captions are indexed by YouTube, so the cue text deliberately includes
+    the phrases people search for ('wordle answer today', the answer word,
+    yesterday's answer, etc.). Returns the SRT string.
+    """
+    try:
+        def fmt(t):
+            t = max(0, int(t))
+            h, rem = divmod(t, 3600)
+            m, s = divmod(rem, 60)
+            return f"{h:02d}:{m:02d}:{s:02d},000"
+
+        cues = []
+        for i, (sec, label) in enumerate(video_chapters):
+            end = (video_chapters[i + 1][0] if i + 1 < len(video_chapters)
+                   else max(sec + 8, int(total_duration or 0)))
+            text = (f"{label}. Wordle answer today {video_date} — "
+                    f"puzzle #{puzzle_num}.")
+            low = label.lower()
+            if "analysis" in low or "definition" in low:
+                if solution:
+                    text += f" Today's Wordle answer is {solution.upper()}."
+                d = (dict_info or {}).get("definition", "")
+                if d:
+                    text += f" {d[:140]}"
+            elif "recap" in low and (ytd_info or {}).get("yesterday"):
+                text += (f" Yesterday's Wordle answer was "
+                         f"{ytd_info['yesterday']['word'].upper()}.")
+            elif "hints" in low and solution:
+                n_v = sum(1 for c in solution if c in "aeiou")
+                text += (f" Hint: the word starts with "
+                         f"{solution[0].upper()} and has {n_v} "
+                         f"vowel{'s' if n_v != 1 else ''}.")
+            elif "teaser" in low and (ytd_info or {}).get("tomorrow"):
+                text += (f" Tomorrow's Wordle starts with "
+                         f"{ytd_info['tomorrow']['word'][0].upper()}.")
+            cues.append((sec, end, text))
+
+        if not cues:
+            return ""
+        srt = ""
+        for i, (a, b, t) in enumerate(cues, 1):
+            srt += f"{i}\n{fmt(a)} --> {fmt(b)}\n{t}\n\n"
+        return srt
+    except Exception as e:
+        print(f"[captions] SRT build failed: {e}")
+        return ""
+
+
+def youtube_upload_captions(youtube, video_id, srt_path, language="en"):
+    """Upload an SRT caption track (needs youtube.force-ssl scope).
+    Best-effort: failures never block the main flow."""
+    try:
+        media = MediaFileUpload(srt_path, mimetype='application/octet-stream',
+                                resumable=False)
+        youtube.captions().insert(
+            part='snippet',
+            body={'snippet': {
+                'videoId': video_id,
+                'language': language,
+                'name': 'English (chapters + answers)',
+            }},
+            media_body=media
+        ).execute()
+        print("[captions] Caption track uploaded (indexed for search)")
+        return True
+    except Exception as e:
+        print(f"[captions] Upload failed (non-blocking): {e}")
         return False
 
 
@@ -2072,7 +2380,7 @@ with sync_playwright() as p:
 # Convert webm to mp4 and add intro
 print("Processing video with intro...")
 video_chapters = []        # real chapter timestamps, filled during assembly
-tts_clips_to_close = []    # closed only AFTER the final render
+final_video_duration = 0   # captured after assembly, used for captions SRT
 temp_images_to_clean = []  # segment PNGs, deleted only AFTER the final render
 try:
     # Load the gameplay video
@@ -2134,88 +2442,12 @@ try:
         content_clips.append(outro_clip)
 
     # 4. PREPARE MAIN CONTENT (Gameplay + Outro)
+    # NOTE: music is NOT applied here anymore — one consistent track is
+    # applied to the ENTIRE final video (intro -> teaser) after assembly.
     if content_clips:
         main_content_clip = concatenate_videoclips(content_clips, method="compose")
     else:
         main_content_clip = None
-
-    # 5. ADD MUSIC TO MAIN CONTENT
-    if main_content_clip:
-        songs = [f for f in os.listdir(base_dir) if f.endswith('.mp3') and f.startswith('song')]
-        if songs:
-            selected_song = random.choice(songs)
-            song_path = os.path.join(base_dir, selected_song)
-            print(f"Adding background music to main content: {selected_song}")
-
-            try:
-                audio_clip = AudioFileClip(song_path)
-                # Loop audio if shorter than content, or cut if different
-                if audio_clip.duration < main_content_clip.duration:
-                    final_audio = afx.audio_loop(audio_clip, duration=main_content_clip.duration)
-                else:
-                    final_audio = audio_clip.subclip(0, main_content_clip.duration)
-
-                # Set audio to main content
-                main_content_clip = main_content_clip.set_audio(final_audio)
-                print("Audio track set successfully on gameplay/outro.")
-            except Exception as e:
-                print(f"Error processing audio: {e}")
-        else:
-            print("No background music found.")
-
-    # 5b. TTS VOICEOVER (best-effort, gTTS — free)
-    # Generate a short voiceover for the intro+gameplay segment explaining
-    # what we're doing. We composite it OVER the existing music at low volume.
-    try:
-        if main_content_clip and known_solution:
-            print("[tts] Generating voiceover...")
-            voiceover_text_parts = [
-                f"Today's Wordle is puzzle number {puzzle_num}.",
-                f"Let's see if we can crack it.",
-            ]
-            # Add per-round commentary
-            for i, (word, fb) in enumerate(guesses_made):
-                if fb == "22222":
-                    voiceover_text_parts.append(
-                        f"Round {i+1}: {word.upper()}! Solved it!"
-                    )
-                else:
-                    greens = sum(1 for c in fb if c == "2")
-                    yellows = sum(1 for c in fb if c == "1")
-                    voiceover_text_parts.append(
-                        f"Round {i+1}: {word.upper()}. "
-                        f"{greens} green, {yellows} yellow."
-                    )
-            if dict_info.get("definition"):
-                voiceover_text_parts.append(
-                    f"The word {known_solution.upper()} means: "
-                    f"{dict_info['definition'][:120]}"
-                )
-
-            voiceover_text = " ".join(voiceover_text_parts)
-            tts_path = os.path.join(base_dir, f"tts_{puzzle_date}.mp3")
-            if generate_tts_audio(voiceover_text, tts_path):
-                tts_clip = AudioFileClip(tts_path)
-                # NOTE: do NOT close() tts_clip or delete tts_path here.
-                # The composite audio still references this clip and it is
-                # only read during write_videofile() below. Closing/deleting
-                # it early used to crash the render, which silently fell
-                # back to uploading the raw gameplay webm — losing the
-                # intro AND all recap/hints/analysis/teaser segments.
-                # Mix: music at 25% volume + TTS at 100%
-                if main_content_clip.audio:
-                    music_audio = main_content_clip.audio.volumex(0.25)
-                    # TTS starts at t=0 of main_content_clip (gameplay),
-                    # while the intro keeps its own original audio.
-                    composite_audio = CompositeAudioClip([
-                        music_audio,
-                        tts_clip,
-                    ])
-                    main_content_clip = main_content_clip.set_audio(composite_audio)
-                    print("[tts] Voiceover mixed with background music")
-                tts_clips_to_close.append(tts_clip)
-    except Exception as e:
-        print(f"[tts] Voiceover workflow failed: {e}")
 
     # 6. FINAL ASSEMBLY (Intro + Yesterday Recap + Hints + Main Content + Word Analysis + Tomorrow Teaser)
     # New content segments (each ~5-15s) to extend video to 3-4 minutes:
@@ -2274,19 +2506,51 @@ try:
         final_parts.append(main_content_clip)
         seg_cursor += _clip_dur(main_content_clip)
 
-    # 6c. WORD ANALYSIS SEGMENT (15 seconds, after gameplay/outro)
+    # 6c. WORD ANALYSIS SLIDES (3 x 8s, after gameplay/outro)
+    # Slide 1: definition | Slide 2: letter frequency | Slide 3: facts + solve path
     try:
         if known_solution:
-            analysis_img_path = os.path.join(base_dir, f"analysis_{puzzle_date}.png")
-            if generate_word_analysis_image(analysis_img_path, puzzle_num, known_solution, dict_info, letter_freq_info):
-                analysis_clip = ImageClip(analysis_img_path).set_duration(15).set_fps(24).resize(width=1920, height=1080)
-                video_chapters.append((seg_cursor, "Word analysis, definition & letter stats"))
-                final_parts.append(analysis_clip)
-                seg_cursor += _clip_dur(analysis_clip)
-                temp_images_to_clean.append(analysis_img_path)
-                print("[analysis] Added word analysis segment (15s)")
+            def_img = os.path.join(base_dir, f"analysis_def_{puzzle_date}.png")
+            if generate_definition_slide(def_img, puzzle_num, video_date,
+                                         known_solution, dict_info):
+                clip = ImageClip(def_img).set_duration(8).set_fps(24).resize(width=1920, height=1080)
+                video_chapters.append((seg_cursor, "Word analysis & definition"))
+                final_parts.append(clip)
+                seg_cursor += _clip_dur(clip)
+                temp_images_to_clean.append(def_img)
+                print("[analysis] Added definition slide (8s)")
     except Exception as e:
-        print(f"[analysis] Segment failed: {e}")
+        print(f"[analysis] Definition slide failed: {e}")
+
+    try:
+        if known_solution:
+            freq_img = os.path.join(base_dir, f"analysis_freq_{puzzle_date}.png")
+            if generate_letter_frequency_slide(freq_img, puzzle_num, video_date,
+                                               known_solution, letter_freq_info):
+                clip = ImageClip(freq_img).set_duration(8).set_fps(24).resize(width=1920, height=1080)
+                video_chapters.append((seg_cursor, "Letter frequency analysis"))
+                final_parts.append(clip)
+                seg_cursor += _clip_dur(clip)
+                temp_images_to_clean.append(freq_img)
+                print("[analysis] Added letter frequency slide (8s)")
+    except Exception as e:
+        print(f"[analysis] Frequency slide failed: {e}")
+
+    try:
+        if known_solution:
+            facts_img = os.path.join(base_dir, f"analysis_facts_{puzzle_date}.png")
+            if generate_word_facts_slide(facts_img, puzzle_num, video_date,
+                                         known_solution,
+                                         solve_rounds if solved else 6,
+                                         guesses_made):
+                clip = ImageClip(facts_img).set_duration(8).set_fps(24).resize(width=1920, height=1080)
+                video_chapters.append((seg_cursor, "Word facts & solve path"))
+                final_parts.append(clip)
+                seg_cursor += _clip_dur(clip)
+                temp_images_to_clean.append(facts_img)
+                print("[analysis] Added word facts slide (8s)")
+    except Exception as e:
+        print(f"[analysis] Facts slide failed: {e}")
 
     # 6d. TOMORROW TEASER SEGMENT (5 seconds, at end)
     try:
@@ -2318,17 +2582,39 @@ try:
         final_clip = gameplay_clip # Fallback if everything failed
         video_chapters = []
 
+    final_video_duration = 0
+    try:
+        final_video_duration = float(final_clip.duration or 0)
+    except Exception:
+        pass
+
+    # 7. ONE CONSISTENT MUSIC TRACK ACROSS THE ENTIRE VIDEO (intro -> teaser)
+    # Replaces everything (including the intro's original audio) so the
+    # whole video has the same sound from the first to the last frame.
+    songs = [f for f in os.listdir(base_dir) if f.endswith('.mp3') and f.startswith('song')]
+    if songs and getattr(final_clip, 'duration', 0):
+        selected_song = random.choice(songs)
+        song_path = os.path.join(base_dir, selected_song)
+        print(f"Applying ONE consistent music track to the FULL video: {selected_song}")
+        try:
+            song_clip = AudioFileClip(song_path)
+            if song_clip.duration < final_clip.duration:
+                full_audio = afx.audio_loop(song_clip, duration=final_clip.duration)
+            else:
+                full_audio = song_clip.subclip(0, final_clip.duration)
+            final_clip = final_clip.set_audio(full_audio)
+            print("[audio] Uniform music track set on the entire video.")
+        except Exception as e:
+            print(f"[audio] Failed to apply full-video music: {e}")
+    else:
+        print("[audio] No background music found — video stays silent.")
+
     final_clip.write_videofile(final_video_file, codec='libx264', audio_codec='aac', fps=24)
     final_clip.close()
     gameplay_clip.close()
 
-    # Now that rendering is done, free the TTS clip and delete temp files.
-    for c in tts_clips_to_close:
-        try:
-            c.close()
-        except Exception:
-            pass
-    for tmp in [os.path.join(base_dir, f"tts_{puzzle_date}.mp3")] + temp_images_to_clean:
+    # Rendering is done — safe to delete temp segment images now.
+    for tmp in temp_images_to_clean:
         try:
             if os.path.exists(tmp):
                 os.remove(tmp)
@@ -2523,11 +2809,13 @@ else:
             if make_short_clip_from_video(final_video_file, shorts_path, max_duration=45):
                 shorts_body = {
                     'snippet': {
-                        'title': f"Wordle Answer Today — #{puzzle_num} in 45 seconds ⚡ ({video_date.split(',')[0]})",
+                        # Shorts titles perform best at 30-40 chars (2026 data)
+                        'title': f"Wordle Answer Today #{puzzle_num} ⚡",
                         'description': (
-                            f"Wordle answer today ({video_date}): quick solve of puzzle #{puzzle_num}!\n\n"
+                            f"#Wordle #Shorts #WordleAnswerToday\n\n"
+                            f"Wordle answer today ({video_date}): puzzle #{puzzle_num}!\n"
                             f"Full video with hints, definition & analysis: https://youtu.be/{video_id}\n\n"
-                            f"#Wordle #Shorts #WordleAnswer #WordleAnswerToday"
+                            f"#WordleAnswer #WordleHints"
                         ),
                         'tags': ['wordle answer today', 'Wordle', 'Shorts',
                                  'Wordle Answer', f'Wordle #{puzzle_num}',
@@ -2571,7 +2859,26 @@ else:
             except Exception as e:
                 print(f"[playlist] Workflow failed: {e}")
 
-            # 3b. Post pinned comment (reuses the SAME real chapter timestamps)
+            # 3b. Captions (indexed by YouTube search — real SEO value)
+            try:
+                srt_text = build_captions_srt(
+                    video_chapters, final_video_duration, video_date,
+                    puzzle_num,
+                    known_solution or (guesses_made[-1][0] if guesses_made else ""),
+                    dict_info, ytd_info)
+                if srt_text:
+                    srt_path = os.path.join(base_dir, f"captions_{puzzle_date}.srt")
+                    with open(srt_path, "w", encoding="utf-8") as sf:
+                        sf.write(srt_text)
+                    youtube_upload_captions(youtube, video_id, srt_path)
+                    try:
+                        os.remove(srt_path)
+                    except Exception:
+                        pass
+            except Exception as e:
+                print(f"[captions] Workflow failed: {e}")
+
+            # 3c. Post pinned comment (reuses the SAME real chapter timestamps)
             try:
                 if video_chapters:
                     chapter_lines = [
@@ -2580,19 +2887,29 @@ else:
                     ]
                 else:
                     chapter_lines = ["0:00 The solve"]
+                sub_link = ""
+                try:
+                    ch = youtube.channels().list(part='id', mine=True).execute()
+                    ch_items = ch.get("items", [])
+                    if ch_items:
+                        sub_link = (f"\n🔔 Subscribe for daily Wordle answers: "
+                                    f"https://www.youtube.com/channel/{ch_items[0]['id']}"
+                                    f"/?sub_confirmation=1\n")
+                except Exception:
+                    pass
                 comment_text = (
-                    f"What was your first guess today? 🤔\n\n"
-                    f"⏱️ Chapters:\n" + "\n".join(chapter_lines) +
+                    f"What was your first guess today? 🤔\n"
+                    f"🟩 = got it    🟨 = close    ⬛ = stumped\n"
+                    f"{sub_link}"
+                    f"\n⏱️ Chapters:\n" + "\n".join(chapter_lines) +
                     f"\n\n"
-                    f"Try our FREE Wordle Solver: https://wordsolverx.com/wordle-solver\n"
-                    f"\n"
-                    f"🟩 = got it    🟨 = close    ⬛ = stumped"
+                    f"Try our FREE Wordle Solver: https://wordsolverx.com/wordle-solver"
                 )
                 youtube_pin_comment(youtube, video_id, comment_text)
             except Exception as e:
                 print(f"[comment] Workflow failed: {e}")
 
-            # 3c. Streak counter
+            # 3d. Streak counter
             try:
                 streak_count = youtube_count_recent_uploads(youtube, days=365)
                 print(f"[streak] ~{streak_count} videos uploaded in last 365 days")
