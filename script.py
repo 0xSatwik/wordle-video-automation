@@ -189,100 +189,158 @@ def generate_tts_audio(text, out_path, slow=False):
         return False
 
 
+def _load_thumbnail_fonts():
+    """Load bold display fonts across platforms (Linux CI + Windows dev)."""
+    candidates = [
+        # Windows (local runs) — Impact is the classic YouTube thumbnail font
+        ("C:/Windows/Fonts/impact.ttf", "C:/Windows/Fonts/arialbd.ttf"),
+        ("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", None),
+        ("/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf", None),
+    ]
+    for display_path, fallback_path in candidates:
+        try:
+            if os.path.exists(display_path):
+                return {
+                    'display': ImageFont.truetype(display_path, 150),
+                    'title': ImageFont.truetype(display_path, 108),
+                    'number': ImageFont.truetype(display_path, 120),
+                    'badge': ImageFont.truetype(fallback_path or display_path, 40),
+                    'tile': ImageFont.truetype(display_path, 72),
+                }
+        except Exception:
+            continue
+    default = ImageFont.load_default()
+    return {k: default for k in
+            ('display', 'title', 'number', 'badge', 'tile')}
+
+
 def generate_daily_thumbnail(out_path, puzzle_num, date_str, partial_letters=None,
                              solution=None):
     """
     Generate a custom thumbnail PNG (1280x720) for the daily video.
-    - Shows the puzzle number prominently
-    - Shows a partial Wordle grid (creates curiosity)
-    - Big text: "Can YOU Solve Wordle #NNNN?"
-    - Date in a corner badge
+
+    Design goals (2026 redesign):
+      - Puzzle number HUGE on a green card (top-right): "#1543"
+      - Full date prominently displayed: "AUGUST 24, 2026"
+      - Curiosity-gap tile row (first letters revealed, rest hidden)
+      - Kicker badge with exact search phrase "WORDLE ANSWER TODAY"
+      - Bold outlined text + Wordle-green/yellow palette for CTR
     Uses Pillow only — no external APIs.
     """
     try:
         W, H = 1280, 720
-        # Color palette (high-contrast YouTube thumbnail)
-        bg_color = (15, 23, 42)         # dark slate
+        bg_top = (13, 20, 38)
+        bg_bot = (30, 45, 80)
         text_color = (255, 255, 255)
-        accent = (34, 197, 94)          # wordle green
-        yellow = (234, 179, 8)          # wordle yellow
-        gray = (75, 85, 99)
-        white_tile = (248, 250, 252)
+        accent = (46, 204, 113)         # wordle green
+        accent_dark = (28, 150, 82)
+        yellow = (255, 205, 0)          # wordle yellow
+        gray = (110, 118, 132)
+        outline = (10, 14, 25)
 
-        img = Image.new("RGB", (W, H), bg_color)
+        fonts = _load_thumbnail_fonts()
+
+        img = Image.new("RGB", (W, H), bg_top)
         draw = ImageDraw.Draw(img)
 
-        # Try to load nice fonts; fall back to default
-        font_paths = [
-            "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
-            "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf",
-        ]
-        title_font = None
-        body_font = None
-        tile_font = None
-        for fp in font_paths:
-            if os.path.exists(fp):
-                title_font = ImageFont.truetype(fp, 92)
-                body_font = ImageFont.truetype(fp, 38)
-                tile_font = ImageFont.truetype(fp, 64)
-                break
-        if not title_font:
-            title_font = ImageFont.load_default()
-            body_font = ImageFont.load_default()
-            tile_font = ImageFont.load_default()
-
-        # Background: subtle gradient effect by drawing rectangles
+        # Vertical gradient background
         for y in range(H):
-            r = int(bg_color[0] + (35 - bg_color[0]) * (y / H))
-            g = int(bg_color[1] + (50 - bg_color[1]) * (y / H))
-            b = int(bg_color[2] + (75 - bg_color[2]) * (y / H))
+            t = y / H
+            r = int(bg_top[0] + (bg_bot[0] - bg_top[0]) * t)
+            g = int(bg_top[1] + (bg_bot[1] - bg_top[1]) * t)
+            b = int(bg_top[2] + (bg_bot[2] - bg_top[2]) * t)
             draw.line([(0, y), (W, y)], fill=(r, g, b))
 
-        # Big puzzle number on the right
+        def text_with_shadow(pos, txt, fill, font, anchor=None, shadow_offset=5):
+            x, y = pos
+            draw.text((x + shadow_offset, y + shadow_offset), txt,
+                      fill=outline, font=font, anchor=anchor)
+            draw.text(pos, txt, fill=fill, font=font, anchor=anchor,
+                      stroke_width=3, stroke_fill=outline)
+
+        # ---- Right side: big puzzle-number card -------------------------
         if puzzle_num:
-            num_text = f"#{puzzle_num}"
-            draw.text((W - 360, 60), num_text, fill=accent, font=title_font)
+            card_w, card_h = 430, 330
+            card_x, card_y = W - card_w - 50, 55
+            draw.rounded_rectangle(
+                [card_x + 10, card_y + 12, card_x + card_w + 10, card_y + card_h + 12],
+                radius=36, fill=(8, 12, 22))                      # drop shadow
+            draw.rounded_rectangle(
+                [card_x, card_y, card_x + card_w, card_y + card_h],
+                radius=36, fill=accent, outline=text_color, width=6)
+            num_label = "PUZZLE"
+            draw.text((card_x + card_w // 2, card_y + 52), num_label,
+                      fill=(220, 255, 235), font=fonts['badge'], anchor="mm")
+            text_with_shadow((card_x + card_w // 2, card_y + 155),
+                             f"#{puzzle_num}", fill=text_color,
+                             font=fonts['number'], anchor="mm")
+            # Small wordle-grid motif under the number
+            mini, mgap = 34, 10
+            total_mini = 5 * mini + 4 * mgap
+            mx = card_x + (card_w - total_mini) // 2
+            my = card_y + card_h - 68
+            for i in range(5):
+                c = accent_dark if i < 2 else (255, 255, 255)
+                draw.rounded_rectangle(
+                    [mx + i * (mini + mgap), my,
+                     mx + i * (mini + mgap) + mini, my + mini],
+                    radius=8, fill=c)
 
-        # Title text (left side)
-        draw.text((60, 80), "Can YOU Solve", fill=text_color, font=title_font)
-        draw.text((60, 180), "Today's Wordle?", fill=accent, font=title_font)
+        # ---- Left side: kicker badge + headline --------------------------
+        kick_txt = "WORDLE ANSWER TODAY"
+        kb_font = fonts['badge']
+        kb_box = draw.textbbox((0, 0), kick_txt, font=kb_font)
+        kw, kh = kb_box[2] - kb_box[0], kb_box[3] - kb_box[1]
+        kx, ky = 55, 70
+        draw.rounded_rectangle([kx - 22, ky - 16, kx + kw + 22, ky + kh + 26],
+                               radius=14, fill=yellow)
+        draw.text((kx, ky - 4), kick_txt, fill=(15, 15, 15), font=kb_font)
 
-        # Draw partial Wordle grid (5 tiles, last one yellow = curiosity gap)
-        tile_size = 90
-        gap = 12
-        grid_x = 60
-        grid_y = 360
-        letters = partial_letters or ["A", "D", "I", "E", "?"]
-        for i, letter in enumerate(letters):
+        text_with_shadow((52, 140), "TODAY'S", text_color, fonts['display'])
+        text_with_shadow((52, 290), "WORDLE", accent, fonts['display'])
+
+        # ---- Curiosity tile row ------------------------------------------
+        tile_size, gap = 96, 14
+        grid_x, grid_y = 55, 465
+        letters = partial_letters or ["?", "?", "?", "?", "?"]
+        for i, letter in enumerate(letters[:5]):
             x = grid_x + i * (tile_size + gap)
-            y = grid_y
-            color = accent if i < 4 else yellow
-            draw.rectangle([x, y, x + tile_size, y + tile_size], fill=color, outline=None)
-            # Letter (or "?" for last)
+            if i < 2:
+                fill = accent          # known letters = green
+            elif i == 2:
+                fill = yellow          # close letter = yellow
+            else:
+                fill = gray            # unknown = gray
+            draw.rounded_rectangle([x, grid_y, x + tile_size, grid_y + tile_size],
+                                   radius=16, fill=fill, outline=text_color,
+                                   width=4)
             try:
-                bbox = draw.textbbox((0, 0), letter, font=tile_font)
-                tw, th = bbox[2] - bbox[0], bbox[3] - bbox[1]
-                draw.text((x + (tile_size - tw) // 2 - bbox[0],
-                           y + (tile_size - th) // 2 - bbox[1]),
-                          letter, fill=(0, 0, 0), font=tile_font)
+                draw.text((x + tile_size // 2, grid_y + tile_size // 2),
+                          str(letter), fill=text_color if i != 2 else (15, 15, 15),
+                          font=fonts['tile'], anchor="mm",
+                          stroke_width=2, stroke_fill=outline)
             except Exception:
                 pass
 
-        # Date badge bottom-left
+        # ---- Date banner (FULL date incl. year) ---------------------------
         if date_str:
-            badge_x, badge_y = 60, H - 80
-            draw.rectangle([badge_x, badge_y, badge_x + 280, badge_y + 50],
-                          fill=yellow)
-            draw.text((badge_x + 20, badge_y + 5), date_str.upper(),
-                     fill=(0, 0, 0), font=body_font)
+            d_txt = date_str.upper()
+            db_box = draw.textbbox((0, 0), d_txt, font=kb_font)
+            dw, dh = db_box[2] - db_box[0], db_box[3] - db_box[1]
+            dx, dy = 55, H - dh - 62
+            draw.rounded_rectangle([dx - 18, dy - 14, dx + dw + 18, dy + dh + 22],
+                                   radius=14, fill=(15, 23, 42),
+                                   outline=yellow, width=4)
+            draw.text((dx, dy - 2), d_txt, fill=yellow, font=kb_font)
 
-        # "Watch now" CTA bottom-right
-        cta_x = W - 360
-        cta_y = H - 80
-        draw.rectangle([cta_x, cta_y, cta_x + 300, cta_y + 50],
-                      fill=accent)
-        draw.text((cta_x + 30, cta_y + 5), "WATCH THE SOLVE",
-                 fill=(0, 0, 0), font=body_font)
+        # ---- CTA bottom-right ---------------------------------------------
+        cta_txt = "SOLUTION + HINTS >>"
+        cb = draw.textbbox((0, 0), cta_txt, font=kb_font)
+        cw, ch = cb[2] - cb[0], cb[3] - cb[1]
+        cx, cy = W - cw - 75, H - ch - 62
+        draw.rounded_rectangle([cx - 18, cy - 14, cx + cw + 18, cy + ch + 22],
+                               radius=14, fill=accent)
+        draw.text((cx, cy - 2), cta_txt, fill=(15, 15, 15), font=kb_font)
 
         img.save(out_path, "PNG", optimize=True)
         print(f"[thumbnail] Saved to {out_path}")
@@ -295,6 +353,7 @@ def generate_daily_thumbnail(out_path, puzzle_num, date_str, partial_letters=Non
 def _load_fonts():
     """Load Pillow fonts at multiple sizes. Returns dict of font objects."""
     font_paths = [
+        "C:/Windows/Fonts/arialbd.ttf",
         "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
         "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf",
     ]
@@ -553,30 +612,38 @@ def generate_tomorrow_teaser_image(out_path, tomorrow_info, puzzle_num):
         return False
 
 
+def format_chapter_timestamp(seconds):
+    """Format seconds as a YouTube chapter timestamp 'M:SS'."""
+    try:
+        total = max(0, int(round(seconds)))
+        return f"{total // 60}:{total % 60:02d}"
+    except Exception:
+        return "0:00"
+
+
 def build_chapters_description(video_date, puzzle_num, solve_rounds,
                                 solution, dict_info, letter_freq,
-                                ytd_info, puzzle_date=""):
+                                ytd_info, puzzle_date="", chapters=None):
     """Build the SEO-optimized description WITH chapters.
 
-    Chapter timestamps reflect the actual video structure:
-      0:00  Intro (5s)
-      0:05  Yesterday's recap (5s)
-      0:10  3 hints (10s)
-      0:20  The solve begins (gameplay, ~90s)
-      ~1:50 Outro (5s)
-      ~1:55 Word analysis (15s)
-      ~2:10 Tomorrow's teaser (5s)
+    `chapters` must be a list of (start_seconds, label) tuples computed from
+    the ACTUAL rendered segment durations (see final assembly below), so the
+    timestamps in the description always match the real video. Falls back to
+    a sensible default only if timings were not captured.
     """
-    chapters = [
-        ("0:00", "Intro"),
-        ("0:05", "Yesterday's Wordle recap"),
-        ("0:10", "3 hints before the answer"),
-        ("0:20", "The solve begins"),
-        ("1:50", "Word analysis & definition"),
-        ("2:05", "Letter frequency stats"),
-        ("2:10", "Tomorrow's teaser"),
+    if not chapters:
+        chapters = [
+            (0, "Intro"),
+            (5, "Yesterday's Wordle recap"),
+            (10, "3 hints before the answer"),
+            (20, "The solve begins"),
+            (110, "Word analysis & definition"),
+            (125, "Letter frequency stats"),
+            (130, "Tomorrow's teaser"),
+        ]
+    chapter_lines = [
+        f"{format_chapter_timestamp(sec)} {label}" for sec, label in chapters
     ]
-    chapter_lines = [f"{ts} {title}" for ts, title in chapters]
     chapters_str = "\n".join(chapter_lines)
 
     definition_text = ""
@@ -629,7 +696,9 @@ def build_chapters_description(video_date, puzzle_num, solve_rounds,
     elif solve_rounds >= 3:
         difficulty = "MEDIUM"
 
-    description = f"""🟩 Today's Wordle Answer for {video_date} — Puzzle #{puzzle_num}
+    description = f"""🟩 Wordle Answer Today — {video_date} | Puzzle #{puzzle_num} 🟩
+
+Looking for today's Wordle answer? Watch the full solve with hints, then scroll down for the definition, letter stats and yesterday's recap.
 
 Did you get today's Wordle? Comment your result below! 👇
 🟩 = got it    🟨 = close    ⬛ = stumped
@@ -658,25 +727,36 @@ Did you get today's Wordle? Comment your result below! 👇
 
 
 def build_optimized_title(video_date, puzzle_num):
-    """Pick one of three SEO-optimized title variants (rotates daily)."""
+    """Pick one of three SEO-optimized title variants (rotates daily).
+
+    Every variant contains the exact high-volume search phrase
+    'Wordle Answer Today' (matches wordsolverx.com/wordle-answer-today),
+    the puzzle number and the date. Kept under YouTube's 100-char limit.
+    """
     date_short = video_date.split(",")[0]  # "August 20" instead of full
     variants = [
-        f"Can YOU Solve Wordle #{puzzle_num}? 🤔 Today's Wordle Answer & Hints ({date_short})",
-        f"Wordle #{puzzle_num} ANSWER REVEALED ({date_short}, 2026) — Did You Get It?",
-        f"Today's Wordle #{puzzle_num} Almost Stumped Me 🟩🟩🟩🟩⬛ — Solution & Hints",
+        f"Wordle Answer Today — Wordle #{puzzle_num} Solution & Hints ({date_short}) 🟩",
+        f"Wordle Answer Today ({date_short}) — Puzzle #{puzzle_num} Solved! Did You Get It? 🤔",
+        f"Today's Wordle #{puzzle_num} — Wordle Answer & Hints ({date_short}) 🟩🟩🟩🟩🟩",
     ]
     # Rotate daily based on puzzle_num
     return variants[puzzle_num % len(variants)]
 
 
 def build_optimized_tags(video_date_short, puzzle_date, puzzle_num):
-    """Return 15 high-quality tags (max allowed is ~500 chars total)."""
+    """Return high-quality tags (max allowed is ~500 chars total).
+
+    Leads with the exact 'wordle answer today' head keyword + date/number
+    variants people actually search for.
+    """
+    date_num = puzzle_date.split("-", 1)[1].replace("-", "/")  # "08/24"
     return [
-        'Wordle', 'Wordle Answer', 'Wordle Today',
+        'wordle answer today', 'Wordle', 'Wordle Answer',
+        f'wordle answer today {date_num}', f'Wordle Answer {date_num}',
         f'Wordle #{puzzle_num}', f'Wordle {video_date_short}',
-        'Wordle Solution', 'Wordle Hints', 'Wordle Strategy',
-        'Wordle Solver', 'Daily Wordle', 'NYT Wordle',
-        'Word Game', 'Puzzle', 'How to Solve Wordle', 'Wordle Tips',
+        'Wordle Today', "Today's Wordle Answer", 'Wordle Solution',
+        'Wordle Hints', 'Wordle Hint Today', 'NYT Wordle',
+        'Daily Wordle', 'Wordle Solver', 'Word Game',
     ]
 
 
@@ -738,11 +818,12 @@ def youtube_add_to_playlist(youtube, playlist_id, video_id):
 
 def youtube_pin_comment(youtube, video_id, comment_text):
     """
-    Post a comment and pin it. Requires youtube.force-ssl scope (or similar).
+    Post a comment (with chapters) on the video. Requires youtube.force-ssl
+    scope. NOTE: The YouTube Data API does not expose a 'pin comment'
+    endpoint, so we only post the top-level comment.
     Will silently fail if scope is insufficient.
     """
     try:
-        # Insert comment
         body = {
             "snippet": {
                 "videoId": video_id,
@@ -758,22 +839,6 @@ def youtube_pin_comment(youtube, video_id, comment_text):
         ).execute()
         comment_id = resp["id"]
         print(f"[comment] Posted comment id={comment_id}")
-
-        # Try to pin (requires channel owner + scope)
-        try:
-            youtube.comments().setVerified(
-                id=comment_id, verified=True
-            ).execute()
-            # Pin via comments.markAsSpam-like endpoint — actual pin API:
-            youtube.commentThreads().update(
-                part="id",
-                body={"id": comment_id, "snippet": {"isPinned": True}}
-            ).execute() if False else None
-            # The proper pin API is via the channel's `commentThreads` resource
-            # with `moderateComments` scope. We'll skip the actual pin step
-            # to avoid permission errors; just leaving the comment is enough.
-        except Exception as pe:
-            print(f"[comment] Could not pin (continuing anyway): {pe}")
         return comment_id
     except Exception as e:
         print(f"[comment] Failed: {e}")
@@ -857,9 +922,10 @@ def make_short_clip_from_video(src_video_path, out_path, max_duration=45):
         scale = target_w / src_w
         new_h = int(src_h * scale)
         short = short.resize((target_w, new_h))
-        # If taller than target, crop; if shorter, pad with black
+        # If taller than target, crop center; if shorter, pad with black
         if new_h > target_h:
-            short = short.crop(y_center=new_h // 2, y_max=target_h)
+            y1 = max(0, (new_h - target_h) // 2)
+            short = short.crop(y1=y1, y2=y1 + target_h)
         elif new_h < target_h:
             pad_top = (target_h - new_h) // 2
             pad_bot = target_h - new_h - pad_top
@@ -2001,6 +2067,9 @@ with sync_playwright() as p:
 
 # Convert webm to mp4 and add intro
 print("Processing video with intro...")
+video_chapters = []        # real chapter timestamps, filled during assembly
+tts_clips_to_close = []    # closed only AFTER the final render
+temp_images_to_clean = []  # segment PNGs, deleted only AFTER the final render
 try:
     # Load the gameplay video
     gameplay_clip = VideoFileClip(recorded_video_path)
@@ -2123,34 +2192,24 @@ try:
             tts_path = os.path.join(base_dir, f"tts_{puzzle_date}.mp3")
             if generate_tts_audio(voiceover_text, tts_path):
                 tts_clip = AudioFileClip(tts_path)
-                # Position the TTS to start at the same time as the gameplay
-                # (intro music plays during the intro segment; voiceover
-                # starts when gameplay starts). We use CompositeAudioClip.
-                # Build a silent gap before the voiceover = duration of intro.
-                intro_dur = intro_clip.duration if intro_clip else 0
-                if tts_clip.duration < (main_content_clip.duration - intro_dur):
-                    # Loop not needed; pad silence at end
-                    pass
-                # Mix: music at 30% volume + TTS at 100%
-                from moviepy.audio.AudioClip import AudioClip
-                # Lower the music volume
+                # NOTE: do NOT close() tts_clip or delete tts_path here.
+                # The composite audio still references this clip and it is
+                # only read during write_videofile() below. Closing/deleting
+                # it early used to crash the render, which silently fell
+                # back to uploading the raw gameplay webm — losing the
+                # intro AND all recap/hints/analysis/teaser segments.
+                # Mix: music at 25% volume + TTS at 100%
                 if main_content_clip.audio:
                     music_audio = main_content_clip.audio.volumex(0.25)
-                    # Composite with TTS delayed by intro_dur
-                    # But main_content_clip starts AFTER intro_clip,
-                    # so TTS starts at t=0 of main_content_clip
+                    # TTS starts at t=0 of main_content_clip (gameplay),
+                    # while the intro keeps its own original audio.
                     composite_audio = CompositeAudioClip([
                         music_audio,
                         tts_clip,
                     ])
                     main_content_clip = main_content_clip.set_audio(composite_audio)
                     print("[tts] Voiceover mixed with background music")
-                tts_clip.close()
-                # Clean up TTS file
-                try:
-                    os.remove(tts_path)
-                except Exception:
-                    pass
+                tts_clips_to_close.append(tts_clip)
     except Exception as e:
         print(f"[tts] Voiceover workflow failed: {e}")
 
@@ -2160,9 +2219,22 @@ try:
     #   - 3 Progressive hints (10s, before gameplay)
     #   - Word analysis (15s, after gameplay/outro)
     #   - Tomorrow's teaser (5s, at end)
+    # Track REAL segment start times so YouTube chapters match the actual
+    # video instead of hardcoded guesses.
     final_parts = []
+    video_chapters = []   # [(start_seconds, label), ...]
+    seg_cursor = 0.0
+
+    def _clip_dur(clip):
+        try:
+            return float(clip.duration or 0)
+        except Exception:
+            return 0.0
+
     if intro_clip:
+        video_chapters.append((0.0, "Intro"))
         final_parts.append(intro_clip)
+        seg_cursor += _clip_dur(intro_clip)
 
     # 6a. YESTERDAY RECAP SEGMENT (5 seconds)
     try:
@@ -2170,12 +2242,11 @@ try:
             recap_img_path = os.path.join(base_dir, f"recap_{puzzle_date}.png")
             if generate_yesterday_recap_image(recap_img_path, ytd_info["yesterday"]):
                 recap_clip = ImageClip(recap_img_path).set_duration(5).set_fps(24).resize(width=1920, height=1080)
+                video_chapters.append((seg_cursor, "Yesterday's Wordle recap"))
                 final_parts.append(recap_clip)
+                seg_cursor += _clip_dur(recap_clip)
+                temp_images_to_clean.append(recap_img_path)
                 print("[recap] Added yesterday's solution recap segment (5s)")
-                try:
-                    os.remove(recap_img_path)
-                except Exception:
-                    pass
     except Exception as e:
         print(f"[recap] Segment failed: {e}")
 
@@ -2186,17 +2257,18 @@ try:
             hints_img_path = os.path.join(base_dir, f"hints_{puzzle_date}.png")
             if generate_hints_segment_image(hints_img_path, puzzle_num, video_date, hints_list, known_solution):
                 hints_clip = ImageClip(hints_img_path).set_duration(10).set_fps(24).resize(width=1920, height=1080)
+                video_chapters.append((seg_cursor, "3 hints before the answer"))
                 final_parts.append(hints_clip)
+                seg_cursor += _clip_dur(hints_clip)
+                temp_images_to_clean.append(hints_img_path)
                 print("[hints] Added 3 progressive hints segment (10s)")
-                try:
-                    os.remove(hints_img_path)
-                except Exception:
-                    pass
     except Exception as e:
         print(f"[hints] Segment failed: {e}")
 
     if main_content_clip:
+        video_chapters.append((seg_cursor, "The solve begins"))
         final_parts.append(main_content_clip)
+        seg_cursor += _clip_dur(main_content_clip)
 
     # 6c. WORD ANALYSIS SEGMENT (15 seconds, after gameplay/outro)
     try:
@@ -2204,12 +2276,11 @@ try:
             analysis_img_path = os.path.join(base_dir, f"analysis_{puzzle_date}.png")
             if generate_word_analysis_image(analysis_img_path, puzzle_num, known_solution, dict_info, letter_freq_info):
                 analysis_clip = ImageClip(analysis_img_path).set_duration(15).set_fps(24).resize(width=1920, height=1080)
+                video_chapters.append((seg_cursor, "Word analysis, definition & letter stats"))
                 final_parts.append(analysis_clip)
+                seg_cursor += _clip_dur(analysis_clip)
+                temp_images_to_clean.append(analysis_img_path)
                 print("[analysis] Added word analysis segment (15s)")
-                try:
-                    os.remove(analysis_img_path)
-                except Exception:
-                    pass
     except Exception as e:
         print(f"[analysis] Segment failed: {e}")
 
@@ -2219,12 +2290,11 @@ try:
             teaser_img_path = os.path.join(base_dir, f"teaser_{puzzle_date}.png")
             if generate_tomorrow_teaser_image(teaser_img_path, ytd_info["tomorrow"], puzzle_num):
                 teaser_clip = ImageClip(teaser_img_path).set_duration(5).set_fps(24).resize(width=1920, height=1080)
+                video_chapters.append((seg_cursor, "Tomorrow's teaser"))
                 final_parts.append(teaser_clip)
+                seg_cursor += _clip_dur(teaser_clip)
+                temp_images_to_clean.append(teaser_img_path)
                 print("[teaser] Added tomorrow's teaser segment (5s)")
-                try:
-                    os.remove(teaser_img_path)
-                except Exception:
-                    pass
     except Exception as e:
         print(f"[teaser] Segment failed: {e}")
 
@@ -2237,19 +2307,39 @@ try:
                 print(f"  Segment {i+1}: {part.duration:.1f}s")
             except Exception:
                 pass
+        print("[video] Chapter timestamps (real):")
+        for start, label in video_chapters:
+            print(f"  {format_chapter_timestamp(start)} {label}")
     else:
         final_clip = gameplay_clip # Fallback if everything failed
+        video_chapters = []
 
     final_clip.write_videofile(final_video_file, codec='libx264', audio_codec='aac', fps=24)
     final_clip.close()
     gameplay_clip.close()
+
+    # Now that rendering is done, free the TTS clip and delete temp files.
+    for c in tts_clips_to_close:
+        try:
+            c.close()
+        except Exception:
+            pass
+    for tmp in [os.path.join(base_dir, f"tts_{puzzle_date}.mp3")] + temp_images_to_clean:
+        try:
+            if os.path.exists(tmp):
+                os.remove(tmp)
+        except Exception:
+            pass
 
     # Clean up webm
     if os.path.exists(recorded_video_path):
         os.remove(recorded_video_path)
 except Exception as e:
     print(f"Video processing error: {e}")
+    import traceback
+    traceback.print_exc()
     final_video_file = recorded_video_path
+    video_chapters = []
 
 # ============================================================================
 # UPLOAD AND SHARING
@@ -2316,6 +2406,7 @@ else:
             letter_freq=letter_freq_info,
             ytd_info=ytd_info,
             puzzle_date=puzzle_date,
+            chapters=video_chapters,
         )
 
         # Read and append default description if it exists (legacy support)
@@ -2378,7 +2469,7 @@ else:
         generate_daily_thumbnail(
             out_path=thumbnail_path,
             puzzle_num=puzzle_num,
-            date_str=video_date.split(",")[0],
+            date_str=video_date,          # full date incl. year, e.g. "August 24, 2026"
             partial_letters=partial_letters,
             solution=known_solution,
         )
@@ -2428,13 +2519,15 @@ else:
             if make_short_clip_from_video(final_video_file, shorts_path, max_duration=45):
                 shorts_body = {
                     'snippet': {
-                        'title': f"Wordle #{puzzle_num} in 45 seconds ⚡ ({video_date.split(',')[0]})",
+                        'title': f"Wordle Answer Today — #{puzzle_num} in 45 seconds ⚡ ({video_date.split(',')[0]})",
                         'description': (
-                            f"Quick solve of Wordle #{puzzle_num}!\n\n"
-                            f"Full video with hints & analysis: https://youtu.be/{video_id}\n\n"
-                            f"#Wordle #Shorts #WordleAnswer"
+                            f"Wordle answer today ({video_date}): quick solve of puzzle #{puzzle_num}!\n\n"
+                            f"Full video with hints, definition & analysis: https://youtu.be/{video_id}\n\n"
+                            f"#Wordle #Shorts #WordleAnswer #WordleAnswerToday"
                         ),
-                        'tags': ['Wordle', 'Shorts', 'Wordle Answer', f'Wordle #{puzzle_num}'],
+                        'tags': ['wordle answer today', 'Wordle', 'Shorts',
+                                 'Wordle Answer', f'Wordle #{puzzle_num}',
+                                 video_date.split(',')[0]],
                         'categoryId': '20',
                     },
                     'status': {'privacyStatus': 'unlisted'},  # avoid duplicate penalty
@@ -2474,17 +2567,19 @@ else:
             except Exception as e:
                 print(f"[playlist] Workflow failed: {e}")
 
-            # 3b. Post pinned comment
+            # 3b. Post pinned comment (reuses the SAME real chapter timestamps)
             try:
+                if video_chapters:
+                    chapter_lines = [
+                        f"{format_chapter_timestamp(sec)} {label}"
+                        for sec, label in video_chapters
+                    ]
+                else:
+                    chapter_lines = ["0:00 The solve"]
                 comment_text = (
                     f"What was your first guess today? 🤔\n\n"
-                    f"⏱️ Chapters:\n"
-                    f"0:00 Can you solve it?\n"
-                    f"0:15 3 hints\n"
-                    f"0:35 The solve begins\n"
-                    f"2:05 Word analysis\n"
-                    f"2:50 WordleBot comparison\n"
-                    f"\n"
+                    f"⏱️ Chapters:\n" + "\n".join(chapter_lines) +
+                    f"\n\n"
                     f"Try our FREE Wordle Solver: https://wordsolverx.com/wordle-solver\n"
                     f"\n"
                     f"🟩 = got it    🟨 = close    ⬛ = stumped"
